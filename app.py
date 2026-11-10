@@ -18,7 +18,9 @@ matplotlib.use("Agg")  # 화면 없이 그림 파일로만 그린다 (서버용)
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+import networkx as nx  # 관계 지식 그래프 · 중심성 · 무리(커뮤니티) 계산
 import statsmodels.formula.api as smf
+from pyvis.network import Network  # 대화형 관계도 (vis-network)
 from scipy.stats import chi2_contingency
 import streamlit as st
 from matplotlib import font_manager
@@ -914,7 +916,7 @@ def caution_lines():
 AI_RULES_FILE = Path(__file__).parent / "ai_rules.md"
 AI_RULE_NAMES = [
     "SAFE_RULE", "AI_CARD_RULE", "COUNTRY_CHECK_RULE",
-    "CHAT_FORMAT_RULE", "CHAT_FORMAT_REMINDER", "CHATBOT_RULE", "CHAT_TONES", "REPORT_RULE",
+    "CHAT_FORMAT_RULE", "CHAT_FORMAT_REMINDER", "CHATBOT_RULE", "CHAT_TONES", "REPORT_RULE", "GRAPH_QA_RULE",
 ]
 
 
@@ -958,6 +960,8 @@ def by_sentence(text):
 
 # AI 미션 카드 지시문 — 전체 이용가 규칙 뒤에 붙인다 (내용은 ai_rules.md)
 AI_CARD_RULE = SAFE_RULE + AI_RULES["AI_CARD_RULE"]
+# 관계도에 물어보기(그래프 RAG) 지시문 (내용은 ai_rules.md)
+GRAPH_QA_RULE = SAFE_RULE + AI_RULES["GRAPH_QA_RULE"]
 # 멘토링 보고서의 핵심 요약·지도 코칭·보고서 초안 지시문 (내용은 ai_rules.md)
 REPORT_RULE = SAFE_RULE + AI_RULES["REPORT_RULE"]
 
@@ -1729,7 +1733,7 @@ def names_to_ids(lines, df):
     return out
 
 
-def make_report_text(rep, rows, df, skips, finales, rounds, stats_lines=(), focus_lines=()):
+def make_report_text(rep, rows, df, skips, finales, rounds, stats_lines=(), focus_lines=(), graph_lines=()):
     # 핵심 요약 · 지도 코칭 · 보고서 초안 — 실패하거나 규칙에 어긋나면 (None, 이유)
     kind, kids = rep.get("kind", "전체"), rep.get("kids", [])
     focus = f"[보고서 종류] {kind}" + (f" — 대상: {', '.join(kids)}" if kids else " — 고른 범위의 아동 전체")
@@ -1741,7 +1745,8 @@ def make_report_text(rep, rows, df, skips, finales, rounds, stats_lines=(), focu
                 system_instruction=REPORT_RULE,
                 input=report_ai_input(rep, rows, df, skips, finales, rounds)
                 + "\n\n[정량 분석 결과]\n" + "\n".join(stats_lines)
-                + "\n\n" + focus + ("\n[대상 지표]\n" + "\n".join(focus_lines) if focus_lines else ""),
+                + "\n\n" + focus + ("\n[대상 지표]\n" + "\n".join(focus_lines) if focus_lines else "")
+                + ("\n\n[관계 그래프 근거]\n" + "\n".join(graph_lines) if graph_lines else ""),
             )
         out = (interaction.output_text or "").strip()
     except Exception as e:
@@ -2609,6 +2614,387 @@ def fig_relation(df, ids):
     return fig_png(fig), 10 / 7.4
 
 
+# ---------- 관계도 — 관계 온톨로지(지식 그래프) · 대화형 관계도 · 그래프 RAG ----------
+# 온톨로지(무엇을 점·선으로 두는지 정한 틀)
+#   점(노드) : 아동 · 성향 · 기피 특성 · 잘 맞는 미션 종류
+#   선(엣지) : 아동 —함께함(친밀도)— 아동 / 아동 —성향→ 성향 / 아동 —기피→ 기피 특성 / 아동 —선호→ 미션 종류
+# 친밀도(0~100) : 두 아동이 함께한 미션의 평균 반응 점수를 100점으로 바꾼 값.
+#   함께한 횟수가 적으면 우연일 수 있어 보통(50) 쪽으로 당긴다 (함께 2번 분량의 '보통'을 미리 섞는 방식)
+INTIMACY_PRIOR = 2
+# 무리 색 — 친밀도 선 색(주황 = 아직 낯섦)과 헷갈리지 않게 주황·빨강 계열은 쓰지 않는다
+GROUP_COLORS = ["#1E2A5A", "#2F6FC0", "#3E9C8F", "#8A6FC9", "#6B7BA6", "#7A8B3A", "#B05A8E"]
+GRAPH_QA_LIMIT = 10  # 한 번 접속에 '관계도에 물어보기' 횟수 (Gemini 비용을 줄인다)
+
+
+def intimacy(mean, n):
+    return round(((mean * n + 1.0 * INTIMACY_PRIOR) / (n + INTIMACY_PRIOR)) / 2 * 100)
+
+
+def intimacy_label(x):
+    return "매우 친함" if x >= 80 else "친함" if x >= 62 else "보통" if x >= 45 else "아직 낯섦"
+
+
+def intimacy_color(x):
+    return "#1E2A5A" if x >= 80 else "#2F6FC0" if x >= 62 else "#9FC4EE" if x >= 45 else "#E08A3C"
+
+
+def child_profile(cid):
+    # children.csv 의 성향·기피 (이름을 모르는 예전 추가 아동은 비어 있다)
+    info = CHILD_INFO.get(name_of(cid), {})
+    avoid = [a.strip() for a in str(info.get("avoid") or "").split("|") if a.strip() and a.strip() != "nan"]
+    return info.get("traits", []), avoid
+
+
+@st.cache_data(show_spinner=False)
+def build_ontology(df):
+    # 기록(df)으로 관계 지식 그래프를 만든다 — 점 이름은 "child:C01", "trait:내향적" 처럼 종류를 앞에 붙인다
+    G = nx.Graph()
+    for cid, g in df.groupby("child_id"):
+        traits, avoid = child_profile(cid)
+        G.add_node(f"child:{cid}", kind="child", cid=cid, label=report_name(cid), n=len(g),
+                   mean=float(g["점수"].mean()), good=float((g["반응"] == "좋음").mean()),
+                   traits=traits, avoid=avoid)
+        for t in traits:
+            G.add_node(f"trait:{t}", kind="trait", label=t)
+            G.add_edge(f"child:{cid}", f"trait:{t}", rel="성향")
+        for a in avoid:
+            G.add_node(f"avoid:{a}", kind="avoid", label=a)
+            G.add_edge(f"child:{cid}", f"avoid:{a}", rel="기피")
+        types = g.groupby("미션종류")["점수"].agg(["mean", "count"])
+        types = types[types["count"] >= 2].sort_values("mean", ascending=False)
+        if len(types):
+            mt, row = types.index[0], types.iloc[0]
+            G.add_node(f"mtype:{mt}", kind="mtype", label=mt)
+            G.add_edge(f"child:{cid}", f"mtype:{mt}", rel="선호", mean=float(row["mean"]), count=int(row["count"]))
+    # 함께함 — 같은 미션 기록에 같이 있던 두 아동
+    pair = {}
+    for kids, score, _ in record_sets(df).values():
+        kids = sorted(kids)
+        for i, a in enumerate(kids):
+            for b in kids[i + 1:]:
+                pair.setdefault((a, b), []).append(score)
+    for (a, b), scores in pair.items():
+        n, mean = len(scores), sum(scores) / len(scores)
+        x = intimacy(mean, n)
+        G.add_edge(f"child:{a}", f"child:{b}", rel="함께함", count=n, mean=mean, intimacy=x, tag=intimacy_label(x))
+
+    # 관계 지표 — 아동끼리 선만 본다
+    kids = [v for v, d in G.nodes(data=True) if d["kind"] == "child"]
+    H = G.subgraph(kids).copy()
+    for u, v, d in H.edges(data=True):
+        d["w"] = d["count"] * d["intimacy"] / 100       # 많이, 친하게 함께할수록 강한 연결
+        d["dist"] = 1 / max(d["w"], 0.01)                # 경로 계산용 거리 (강한 연결 = 가까움)
+    strength = dict(H.degree(weight="w"))
+    top = max(strength.values(), default=0) or 1
+    bridge = nx.betweenness_centrality(H, weight="dist", normalized=True) if H.number_of_edges() else {}
+    groups = []
+    if H.number_of_edges():
+        groups = [sorted(c) for c in nx.algorithms.community.greedy_modularity_communities(H, weight="w")]
+    group_of = {v: i for i, c in enumerate(groups) for v in c}
+    for v in kids:
+        G.nodes[v]["centrality"] = strength.get(v, 0) / top
+        G.nodes[v]["bridge"] = bridge.get(v, 0.0)
+        G.nodes[v]["group"] = group_of.get(v, len(groups))
+        G.nodes[v]["degree"] = H.degree(v)
+    G.graph["groups"] = [[G.nodes[v]["label"] for v in c] for c in groups]
+    return G
+
+
+def child_relations(G, node):
+    rel = [(G.nodes[o]["label"], d) for o, d in ((o, G.edges[node, o]) for o in G.neighbors(node)) if d["rel"] == "함께함"]
+    return sorted(rel, key=lambda x: (-x[1]["intimacy"], -x[1]["count"]))
+
+
+def graph_triples(G, focus=None, limit=40):
+    # 그래프 RAG — 질문·보고서에 필요한 관계 사실만 그래프에서 꺼내 "주어 -[관계]- 대상" 줄로 만든다 (아동은 번호로)
+    # focus 가 있으면 그 아동과 이어진 것(1단계 이웃), 없으면 친밀도가 높은/낮은 선과 무리 정보
+    cid = lambda v: G.nodes[v].get("cid", G.nodes[v]["label"])
+    lines = []
+    kids = [v for v, d in G.nodes(data=True) if d["kind"] == "child"]
+    if focus:
+        center = [f"child:{c}" for c in focus if f"child:{c}" in G]
+        seen = set()
+        for v in center:
+            d = G.nodes[v]
+            lines.append(f"{cid(v)}: 참여 {d['n']}건, 평균 반응 점수 {d['mean']:.2f}, 관계 중심성 {d['centrality']:.2f}, "
+                         f"연결 다리 정도 {d['bridge']:.2f}, 무리 {d['group'] + 1}")
+            for o in G.neighbors(v):
+                e = G.edges[v, o]
+                key = tuple(sorted((v, o)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if e["rel"] == "함께함":
+                    lines.append(f"{cid(v)} -[함께함 {e['count']}번 · 친밀도 {e['intimacy']}({e['tag']})]- {cid(o)}")
+                elif e["rel"] == "선호":
+                    lines.append(f"{cid(v)} -[반응이 가장 좋은 미션 종류]-> {G.nodes[o]['label']} (평균 {e['mean']:.2f}, {e['count']}건)")
+                else:
+                    lines.append(f"{cid(v)} -[{e['rel']}]-> {G.nodes[o]['label']}")
+    else:
+        edges = sorted(((u, v, d) for u, v, d in G.edges(data=True) if d["rel"] == "함께함"),
+                       key=lambda x: (-x[2]["intimacy"], -x[2]["count"]))
+        for u, v, d in edges[:8] + [e for e in edges[-3:] if e not in edges[:8]]:
+            lines.append(f"{cid(u)} -[함께함 {d['count']}번 · 친밀도 {d['intimacy']}({d['tag']})]- {cid(v)}")
+        for i, grp in enumerate(G.graph.get("groups", [])):
+            ids = [G.nodes[v]["cid"] for v in kids if G.nodes[v]["label"] in grp]
+            lines.append(f"무리 {i + 1}: {', '.join(ids)}")
+        hub = sorted(kids, key=lambda v: -G.nodes[v]["centrality"])[:3]
+        lines.append("관계 중심성이 높은 아동: " + ", ".join(f"{cid(v)}({G.nodes[v]['centrality']:.2f})" for v in hub))
+        br = sorted(kids, key=lambda v: -G.nodes[v]["bridge"])[:2]
+        lines.append("무리 사이를 잇는 연결 다리 아동: " + ", ".join(f"{cid(v)}({G.nodes[v]['bridge']:.2f})" for v in br))
+    return lines[:limit]
+
+
+def graph_html(G, show=("trait", "avoid", "mtype"), focus=(), height=620):
+    # 대화형 관계도 (vis-network · pyvis) — 아동을 누르면 이어진 것만 밝게, 오른쪽 패널에 성향·기피·친밀도·중심성
+    net = Network(height=f"{height}px", width="100%", cdn_resources="in_line", bgcolor="#FFFFFF", font_color="#1B2240")
+    info = {}
+    for v, d in G.nodes(data=True):
+        if d["kind"] == "child":
+            size = 16 + min(d["n"], 20) * 1.2
+            color = GROUP_COLORS[d["group"] % len(GROUP_COLORS)]
+            net.add_node(v, label=d["label"], shape="dot", size=size, color={"background": color, "border": "#FFFFFF"},
+                         borderWidth=3, font={"size": 15, "face": "Malgun Gothic", "color": "#1B2240", "strokeWidth": 4,
+                                              "strokeColor": "#FFFFFF"},
+                         title=f"{d['label']} · 참여 {d['n']}건 · 평균 {d['mean']:.2f}")
+            info[v] = {
+                "name": d["label"], "traits": d["traits"], "avoid": d["avoid"], "n": d["n"], "mean": round(d["mean"], 2),
+                "good": round(d["good"] * 100), "centrality": round(d["centrality"], 2), "bridge": round(d["bridge"], 2),
+                "group": d["group"] + 1, "color": color,
+                "prefer": [G.nodes[o]["label"] for o in G.neighbors(v) if G.edges[v, o]["rel"] == "선호"],
+                "rel": [{"name": n, "count": e["count"], "x": e["intimacy"], "tag": e["tag"], "c": intimacy_color(e["intimacy"])}
+                        for n, e in child_relations(G, v)],
+            }
+        elif d["kind"] in show:
+            style = {"trait": ("diamond", "#C8DBF0", "성향"), "avoid": ("triangle", "#F7C9A0", "기피 특성"),
+                     "mtype": ("square", "#FFE9A8", "잘 맞는 미션 종류")}[d["kind"]]
+            net.add_node(v, label=d["label"], shape=style[0], size=9, color={"background": style[1], "border": "#FFFFFF"},
+                         font={"size": 11, "face": "Malgun Gothic", "color": "#5B6B94"}, title=f"{style[2]} · {d['label']}")
+    for u, v, d in G.edges(data=True):
+        if d["rel"] == "함께함":
+            net.add_edge(u, v, width=1 + min(d["count"], 6) * 1.1, color=intimacy_color(d["intimacy"]),
+                         title=f"{G.nodes[u]['label']} · {G.nodes[v]['label']} — 함께 {d['count']}번 · 친밀도 {d['intimacy']} ({d['tag']})")
+        elif G.nodes[v if G.nodes[u]["kind"] == "child" else u]["kind"] in show:
+            net.add_edge(u, v, width=1, dashes=True, color="#C8D3E3", title=d["rel"])
+    net.set_options(json.dumps({
+        "physics": {"solver": "forceAtlas2Based", "forceAtlas2Based": {"gravitationalConstant": -60, "springLength": 120,
+                                                                       "springConstant": 0.06, "damping": 0.6},
+                    "stabilization": {"iterations": 250}},
+        "interaction": {"hover": True, "tooltipDelay": 120, "navigationButtons": False},
+        "edges": {"smooth": {"type": "continuous"}},
+    }))
+    html_ = net.generate_html(notebook=False)
+    # 쓰지 않는 bootstrap 주소는 뺀다 — 실행 중 외부 인터넷을 부르지 않게
+    html_ = re.sub(r'<link[^>]+bootstrap[^>]*>', "", html_)
+    html_ = re.sub(r'<script[^>]+bootstrap[^>]*></script>', "", html_)
+    panel = """
+<style>
+  body { margin: 0; font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; }
+  .card { border: none !important; }
+  #mynetwork { border: 1px solid #DCE5F0 !important; border-radius: 16px; background: #FFFFFF; }
+  #yuco-panel { position: absolute; top: 12px; right: 12px; width: 270px; max-height: calc(100% - 24px); overflow: auto;
+    background: rgba(255,255,255,.97); border: 1px solid #DCE5F0; border-radius: 14px; padding: 14px 14px 10px;
+    box-shadow: 0 6px 20px rgba(30,42,90,.12); font-size: 13px; color: #1B2240; display: none; }
+  #yuco-panel h3 { margin: 0 0 4px; font-size: 17px; color: #1E2A5A; display: flex; align-items: center; gap: 8px; }
+  #yuco-panel .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  #yuco-panel .k { color: #6B7BA6; font-size: 11.5px; font-weight: 700; margin: 10px 0 4px; letter-spacing: .04em; }
+  #yuco-panel .chip { display: inline-block; background: #EEF4FB; border-radius: 999px; padding: 2px 9px; margin: 2px 3px 2px 0; font-size: 12px; }
+  #yuco-panel .chip.avoid { background: #FDEBDC; }
+  #yuco-panel .chip.mt { background: #FFF3C9; }
+  #yuco-panel .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  #yuco-panel .stat { background: #F4F8FD; border-radius: 10px; padding: 6px 4px; text-align: center; }
+  #yuco-panel .stat b { display: block; font-size: 15px; color: #1E2A5A; }
+  #yuco-panel .stat span { font-size: 10.5px; color: #6B7BA6; }
+  #yuco-panel .rel { display: grid; grid-template-columns: 1fr 70px; gap: 6px; align-items: center; margin: 4px 0; }
+  #yuco-panel .bar { height: 7px; border-radius: 4px; background: #EEF2F8; overflow: hidden; }
+  #yuco-panel .bar i { display: block; height: 100%; }
+  #yuco-panel .x { position: absolute; top: 8px; right: 10px; cursor: pointer; color: #8A97B8; font-size: 16px; }
+  #yuco-legend { position: absolute; left: 12px; bottom: 12px; background: rgba(255,255,255,.95); border: 1px solid #DCE5F0;
+    border-radius: 12px; padding: 8px 10px; font-size: 11.5px; color: #3A4670; line-height: 1.7; }
+  #yuco-legend i { display: inline-block; width: 18px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+  #yuco-hint { position: absolute; left: 12px; top: 12px; background: #1E2A5A; color: #FFD84D; border-radius: 999px;
+    padding: 4px 12px; font-size: 12px; font-weight: 700; }
+</style>
+<div id="yuco-hint">아이를 눌러 보세요</div>
+<div id="yuco-panel"><span class="x" onclick="resetView()">✕</span><div id="yuco-body"></div></div>
+<div id="yuco-legend">
+  <div><b>선 색 = 친밀도</b> (굵기 = 함께한 횟수)</div>
+  <div><i style="background:#1E2A5A"></i>매우 친함 80+ <i style="background:#2F6FC0;margin-left:6px"></i>친함 62+</div>
+  <div><i style="background:#9FC4EE"></i>보통 45+ <i style="background:#E08A3C;margin-left:6px"></i>아직 낯섦</div>
+  <div>점 색 = 친한 무리 · 점 크기 = 참여 수 · ◆성향 ▲기피 ■잘 맞는 미션</div>
+</div>
+<script>
+const INFO = __INFO__;
+const FOCUS = __FOCUS__;
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function showInfo(id){
+  const d = INFO[id]; if(!d) return;
+  const chips = (arr, cls) => arr.length ? arr.map(t => `<span class="chip ${cls}">${esc(t)}</span>`).join('') : '<span style="color:#8A97B8">기록 없음</span>';
+  const rels = d.rel.length ? d.rel.map(r => `<div class="rel"><div><b>${esc(r.name)}</b> <span style="color:#6B7BA6">${r.count}번 · ${esc(r.tag)}</span></div>
+      <div><div class="bar"><i style="width:${r.x}%;background:${r.c}"></i></div><div style="text-align:right;font-size:11px;color:#5B6B94">친밀도 ${r.x}</div></div></div>`).join('')
+      : '<span style="color:#8A97B8">함께한 친구 기록이 없어요</span>';
+  document.getElementById('yuco-body').innerHTML = `
+    <h3><span class="dot" style="background:${d.color}"></span>${esc(d.name)}</h3>
+    <div style="color:#6B7BA6;font-size:12px">무리 ${d.group} · 함께한 친구 ${d.rel.length}명</div>
+    <div class="stats" style="margin-top:8px">
+      <div class="stat"><b>${d.n}</b><span>참여 미션</span></div>
+      <div class="stat"><b>${d.mean.toFixed(2)}</b><span>평균 점수</span></div>
+      <div class="stat"><b>${d.good}%</b><span>좋음 비율</span></div>
+      <div class="stat"><b>${d.centrality.toFixed(2)}</b><span>관계 중심성</span></div>
+      <div class="stat"><b>${d.bridge.toFixed(2)}</b><span>연결 다리</span></div>
+      <div class="stat"><b>${d.rel.length}</b><span>연결 수</span></div>
+    </div>
+    <div class="k">성향</div>${chips(d.traits, '')}
+    <div class="k">기피 특성</div>${chips(d.avoid, 'avoid')}
+    <div class="k">잘 맞는 미션 종류</div>${chips(d.prefer, 'mt')}
+    <div class="k">친밀도 순위</div>${rels}`;
+  document.getElementById('yuco-panel').style.display = 'block';
+  document.getElementById('yuco-hint').style.display = 'none';
+}
+function highlight(ids){
+  const keep = new Set(ids);
+  ids.forEach(id => network.getConnectedNodes(id).forEach(n => keep.add(n)));
+  nodes.update(nodes.get().map(n => ({id: n.id, opacity: keep.has(n.id) ? 1 : 0.12})));
+  edges.update(edges.get().map(e => {
+    const on = ids.includes(e.from) || ids.includes(e.to);
+    return {id: e.id, hidden: false, color: Object.assign({}, typeof e.color === 'object' ? e.color : {color: e.color}, {opacity: on ? 1 : 0.08})};
+  }));
+}
+function resetView(){
+  nodes.update(nodes.get().map(n => ({id: n.id, opacity: 1})));
+  edges.update(edges.get().map(e => ({id: e.id, color: Object.assign({}, typeof e.color === 'object' ? e.color : {color: e.color}, {opacity: 1})})));
+  document.getElementById('yuco-panel').style.display = 'none';
+}
+network.on('click', p => {
+  if (p.nodes.length && INFO[p.nodes[0]]) { showInfo(p.nodes[0]); highlight([p.nodes[0]]); }
+  else if (!p.nodes.length && !p.edges.length) { resetView(); }
+});
+network.once('stabilizationIterationsDone', () => {
+  const f = FOCUS.filter(id => INFO[id]);
+  if (f.length) { showInfo(f[0]); highlight(f); network.fit({nodes: f.concat(...f.map(id => network.getConnectedNodes(id))), animation: true}); }
+});
+</script>
+"""
+    panel = panel.replace("__INFO__", json.dumps(info, ensure_ascii=False)).replace(
+        "__FOCUS__", json.dumps([f"child:{c}" for c in focus], ensure_ascii=False))
+    return html_.replace("</body>", panel + "</body>")
+
+
+@st.cache_data(show_spinner=False)
+def fig_network(df, focus=()):
+    # PDF·Word 용 관계도 그림 (대화형 관계도와 같은 색 규칙) — 아동과 함께함 선만
+    G = build_ontology(df)
+    kids = [v for v, d in G.nodes(data=True) if d["kind"] == "child"]
+    H = G.subgraph(kids)
+    plot_style()
+    fig, ax = plt.subplots(figsize=(8, 6.2))
+    # 이어진 아이들은 고르게 펴지는 배치(카마다-카와이, 친할수록 가깝게), 혼자 있는 아이는 아래쪽에 한 줄로
+    linked = [v for v in kids if H.degree(v)]
+    alone = [v for v in kids if not H.degree(v)]
+    pos = {}
+    if len(linked) > 1:
+        L = H.subgraph(linked).copy()
+        for u, v, d in L.edges(data=True):
+            d["dist"] = 1.6 - d["intimacy"] / 100
+        pos = nx.kamada_kawai_layout(L, weight="dist")
+    elif linked:
+        pos = {linked[0]: (0.0, 0.0)}
+    ys = [y for _, y in pos.values()] or [0.0]
+    for i, v in enumerate(alone):
+        pos[v] = (-0.8 + i * 0.4, min(ys) - 0.45)
+    focus_nodes = {f"child:{c}" for c in focus}
+    for u, v, d in H.edges(data=True):
+        on = not focus_nodes or u in focus_nodes or v in focus_nodes
+        ax.plot([pos[u][0], pos[v][0]], [pos[u][1], pos[v][1]], color=intimacy_color(d["intimacy"]),
+                lw=1 + min(d["count"], 6) * 0.9, alpha=0.9 if on else 0.12, zorder=1)
+    for v in kids:
+        d = G.nodes[v]
+        on = not focus_nodes or v in focus_nodes or any(v in H[f] for f in focus_nodes if f in H)
+        ax.scatter(*pos[v], s=(16 + min(d["n"], 20) * 1.2) ** 2 * 0.9, color=GROUP_COLORS[d["group"] % len(GROUP_COLORS)],
+                   edgecolor="white", linewidth=2.5, alpha=1 if on else 0.2, zorder=2)
+        ax.annotate(d["label"], pos[v], xytext=(0, -24), textcoords="offset points", ha="center", fontsize=9.5,
+                    color="#1B2240", alpha=1 if on else 0.3, zorder=3)
+    for x, lab in [(80, "매우 친함"), (62, "친함"), (45, "보통"), (0, "아직 낯섦")]:
+        ax.plot([], [], color=intimacy_color(x), lw=3, label=lab)
+    ax.legend(title="선 색 = 친밀도", fontsize=8, title_fontsize=8.5, frameon=False, loc="lower right")
+    ax.axis("off")
+    ax.margins(0.12)
+    fig.tight_layout()
+    return fig_png(fig), 8 / 6.2
+
+
+def graph_qa(G, cid, question):
+    # 관계도에 물어보기 — 그 아동 주변(이웃의 이웃까지) 관계 사실만 꺼내 근거로 붙여 Gemini 에 묻는다 (그래프 RAG)
+    near = {cid} | {G.nodes[o]["cid"] for o in G.neighbors(f"child:{cid}") if G.nodes[o]["kind"] == "child"}
+    facts = graph_triples(G, focus=sorted(near), limit=50)
+    # 질문 속 아이 이름도 번호로 바꿔 보낸다 — Gemini 에는 실명을 보내지 않는다 (긴 이름부터)
+    to_id = {d["label"]: d["cid"] for _, d in G.nodes(data=True) if d["kind"] == "child"}
+    q = question
+    for name in sorted(to_id, key=len, reverse=True):
+        q = q.replace(name, to_id[name])
+    ai = gemini()
+    interaction = ai.interactions.create(
+        model=AI_MODEL, system_instruction=GRAPH_QA_RULE,
+        input=f"[질문 대상] {cid}\n[멘토 질문] {q}\n\n[관계 그래프 근거]\n" + "\n".join(facts),
+    )
+    return (interaction.output_text or "").strip(), facts
+
+
+def graph_tab(df, kind, kids):
+    # 보고서 화면 [관계도] 탭 — 대화형 관계도 + 관계 지표 + 그래프 RAG 묻기
+    G = build_ontology(df)
+    child_nodes = [v for v, d in G.nodes(data=True) if d["kind"] == "child"]
+    if not child_nodes:
+        st.info("관계도를 그릴 기록이 아직 없어요.")
+        return
+    c1, c2, c3 = st.columns(3)
+    show = [k for k, on in (("trait", c1.checkbox("성향 보기", value=True, key="g_trait")),
+                            ("avoid", c2.checkbox("기피 특성 보기", value=False, key="g_avoid")),
+                            ("mtype", c3.checkbox("잘 맞는 미션 보기", value=False, key="g_mtype"))) if on]
+    # 관계도 HTML 을 그대로 iframe 으로 띄운다 (st.iframe 은 HTML 글을 받으면 그대로 넣는다)
+    st.iframe(graph_html(G, tuple(show), tuple(kids)), height=640)
+    groups = G.graph.get("groups", [])
+    hub = sorted(child_nodes, key=lambda v: -G.nodes[v]["centrality"])[:3]
+    br = sorted(child_nodes, key=lambda v: -G.nodes[v]["bridge"])[:2]
+    st.caption("친밀도 = 함께한 미션의 평균 반응 점수를 0~100으로 바꾼 값 (함께한 횟수가 적으면 보통 50 쪽으로 당겨 우연을 줄여요).  \n"
+               "관계 중심성 = 많이, 친하게 함께한 정도 (가장 높은 아이 = 1).  연결 다리 = 서로 다른 무리를 이어 주는 정도.  \n"
+               "무리 = 서로 자주·친하게 함께한 아이들끼리 자동으로 묶은 것 (커뮤니티 탐지).")
+    with st.container(border=True):
+        st.markdown("**관계도 한눈에**")
+        for i, grp in enumerate(groups):
+            st.markdown(f"- 무리 {i + 1}: {', '.join(grp)}")
+        st.markdown("- 관계 중심 아이: " + ", ".join(f"{G.nodes[v]['label']}({G.nodes[v]['centrality']:.2f})" for v in hub))
+        st.markdown("- 무리를 잇는 연결 다리: " + ", ".join(f"{G.nodes[v]['label']}({G.nodes[v]['bridge']:.2f})" for v in br))
+
+    # 그래프 RAG — 관계도에서 근거를 찾아 AI 가 답한다
+    with st.container(border=True):
+        st.markdown("**관계도에 물어보기** (그래프 RAG)")
+        st.caption("고른 아이와 이어진 관계 사실을 관계도에서 먼저 찾아, 그 근거만으로 AI가 답해요.")
+        names = child_order([G.nodes[v]["label"] for v in child_nodes])
+        default = report_name(kids[0]) if kids else names[0]
+        who = st.selectbox("누구에 대해", names, index=names.index(default) if default in names else 0, key="g_who")
+        q = st.text_input("질문", placeholder="예: 이 아이와 다음에 짝을 지어 주면 좋을 친구는?", key="g_q")
+        used = st.session_state.setdefault("graph_qa_count", 0)
+        if st.button("관계도에 물어보기", key="g_ask", disabled=not q.strip() or used >= GRAPH_QA_LIMIT):
+            st.session_state.graph_qa_count = used + 1
+            cid = next(G.nodes[v]["cid"] for v in child_nodes if G.nodes[v]["label"] == who)
+            try:
+                with st.spinner("관계도에서 근거를 찾아 답을 쓰는 중..."):
+                    answer, facts = graph_qa(G, cid, q.strip())
+                st.session_state.graph_qa = {"who": who, "q": q.strip(), "answer": answer if is_safe(answer) else "", "facts": facts}
+            except Exception as e:
+                st.warning(friendly_ai_error(e, "답을 만들지 못했어요"))
+        st.caption(f"한 번 접속에 {GRAPH_QA_LIMIT}번까지 — {GRAPH_QA_LIMIT - st.session_state.get('graph_qa_count', 0)}번 남았어요.")
+        res = st.session_state.get("graph_qa")
+        if res:
+            st.markdown(f"**{res['who']}** — {res['q']}")
+            st.markdown(by_sentence(ids_to_names(res["answer"])) if res["answer"] else "규칙에 맞지 않는 답이라 보여 드리지 않아요. 다시 물어봐 주세요.")
+            st.caption("AI가 쓴 초안입니다.")
+            with st.expander(f"근거로 쓴 관계 사실 {len(res['facts'])}개"):
+                for f in res["facts"]:
+                    st.markdown(f"- {ids_to_names(f)}")
+
+
 def kpi_tiles(kpis):
     tiles = "".join(
         f'<div class="yuco-kpi"><div class="yuco-kpi-l">{label}</div><div class="yuco-kpi-v">{value}</div></div>'
@@ -2731,8 +3117,10 @@ def screen_report():
     # 문체를 바꾼 뒤 예전에 만든 요약이 남지 않게 새 이름(v2)으로 담는다
     cache = st.session_state.setdefault("report_ai_v3", {})
     if rep["key"] not in cache:
+        # 그래프 RAG — 관계도에서 고른 아동 주변(또는 전체 무리·강한/약한 연결) 관계 사실을 꺼내 근거로 넘긴다
+        graph_lines = graph_triples(build_ontology(df), focus=kids or None)
         result, note = make_report_text(rep, rows, df, skips, finales, rounds,
-                                        names_to_ids(lines, df), names_to_ids(focus_lines, df))
+                                        names_to_ids(lines, df), names_to_ids(focus_lines, df), graph_lines)
         if result is None:
             result = fallback_report(rep, df, skips, finales, n_missions, counts, focus_lines, mentor_tips, report_tips)
             result["note"] = note
@@ -2760,7 +3148,7 @@ def screen_report():
     legend = alt.Legend(orient="top", title=None)
 
     if kind == "전체":
-        tabs = st.tabs(["한눈에", "아동별 추세", "다중 회귀", "관계·성향", "보고서 편집"])
+        tabs = st.tabs(["한눈에", "관계도", "아동별 추세", "다중 회귀", "관계·성향", "보고서 편집"])
         with tabs[0]:
             left, right = st.columns([1, 1], gap="medium")
             with left:
@@ -2782,11 +3170,13 @@ def screen_report():
                     ), width="stretch",
                 )
         with tabs[1]:
+            graph_tab(df, kind, kids)
+        with tabs[2]:
             st.image(figs["trend"][0], width="stretch")
             st.caption("점 = 미션 한 건, 주황 꺾은선 = 회차 평균, 남색 선 = 회귀선(옅은 띠는 95% 신뢰 구간).  \n"
                        f"기록이 {MIN_TREND_ROWS}건 미만인 아동은 회귀선을 긋지 않아요.")
             table_view()
-        with tabs[2]:
+        with tabs[3]:
             if "coef" in figs:
                 st.image(figs["coef"][0], width="stretch")
                 mm = a["model"]
@@ -2801,7 +3191,7 @@ def screen_report():
                              | {"p값": st.column_config.NumberColumn(format="%.3f")})
             else:
                 st.info(f"다중 회귀는 기록이 {a['model']['need']}건 이상 쌓이면 보여 드려요.  \n지금 {a['model']['n']}건이에요.")
-        with tabs[3]:
+        with tabs[4]:
             c1, c2 = st.columns(2, gap="medium")
             with c1:
                 if "pairs" in figs:
@@ -2810,8 +3200,9 @@ def screen_report():
             with c2:
                 st.image(figs["traits"][0], width="stretch")
                 st.caption("성향별 평균 반응 점수 (주황 선 = 표준오차, n = 기록 수).")
-        edit_tab = tabs[4]
-        doc_figs = [("아동별 반응 수", *fig_overall(df)),
+        edit_tab = tabs[5]
+        doc_figs = [("관계도 (친밀도 네트워크 · 점 색 = 친한 무리)", *fig_network(df)),
+                    ("아동별 반응 수", *fig_overall(df)),
                     ("아동별 추세 (단순 선형 회귀 · 꺾은선 = 회차 평균)", *figs["trend"])]
         if "coef" in figs:
             doc_figs.append(("다중 회귀 계수 (95% 신뢰 구간, * = 유의미)", *figs["coef"]))
@@ -2820,7 +3211,7 @@ def screen_report():
         doc_figs.append(("성향별 평균 반응 점수", *figs["traits"]))
         doc_stats = lines
     else:
-        tabs = st.tabs(["한눈에", "그래프", "지도 코칭", "보고서 편집"])
+        tabs = st.tabs(["한눈에", "관계도", "그래프", "지도 코칭", "보고서 편집"])
         with tabs[0]:
             left, right = st.columns([1, 1], gap="medium")
             with left:
@@ -2829,21 +3220,24 @@ def screen_report():
                 st.markdown(f"**{table['title']}**")
                 table_view()
         with tabs[1]:
+            graph_tab(df, kind, kids)
+        with tabs[2]:
             st.image(focus_fig[1], width="stretch")
             st.caption("반응 점수 : 좋음 2 · 보통 1 · 기피 0.  꺾은선 = 회차 평균, 남색 선 = 회귀선(옅은 띠는 95% 신뢰 구간).  \n"
                        + ("시너지 = 두 아동이 함께한 미션의 평균 − 두 아동 각자의 평균.  남색 = 함께할 때 더 좋음, 주황 = 아직 낯설어함."
                           if kind == "관계" else "n = 미션 수. 기록이 적으면 결과가 크게 흔들릴 수 있어요."))
             for line in focus_lines:
                 st.markdown(f"- {line}")
-        with tabs[2]:
+        with tabs[3]:
             with st.container(border=True):
                 st.markdown(f"**{coaching_title}**")
                 for i, tip in enumerate(coaching, 1):
                     st.markdown(f"{i}. {tip}")
                 st.caption((ai_note if res.get("ai") else "기록 숫자로 만든 기본 코칭이에요.")
                            + "  \n멘토가 현장에서 보는 코칭이에요. 보고서(편집·PDF·Word)에는 보고서 문체로 들어가요.")
-        edit_tab = tabs[3]
-        doc_figs = [(focus_fig[0], focus_fig[1], focus_fig[2])]
+        edit_tab = tabs[4]
+        doc_figs = [("관계도 (친밀도 네트워크 · 고른 아동 중심)", *fig_network(df, tuple(kids))),
+                    (focus_fig[0], focus_fig[1], focus_fig[2])]
         doc_stats = focus_lines
 
     # 보고서 편집 — 제목·요약·코칭·본문을 고친 뒤 PDF 또는 Word 로 내려받는다
