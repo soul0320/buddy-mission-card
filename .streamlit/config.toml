@@ -1,0 +1,26 @@
+# 유코마블 색 테마 — 시작 화면 표지와 같은 색(남색·하늘색·노랑·크림)으로 모든 화면과 사이드바를 맞춘다
+# 이 폴더에서 streamlit run 으로 여는 앱(app.py, lunch.py 등)에 함께 적용된다
+
+[theme]
+base = "light"
+primaryColor = "#1E2A5A"            # 남색 — 버튼, 체크 표시, 선택된 칸
+backgroundColor = "#F6FAFF"         # 아주 옅은 하늘색 바탕
+secondaryBackgroundColor = "#E6F1FC" # 입력칸·안내 상자 바탕
+textColor = "#1B2240"
+borderColor = "#C8DBF0"
+linkColor = "#2F6FC0"
+blueColor = "#2F6FC0"
+yellowColor = "#D49B00"
+baseRadius = "large"
+buttonRadius = "full"
+headingFontWeights = [800, 800, 700, 700, 600, 600]
+showSidebarBorder = false
+
+# 사이드바 — 옅은 안개빛 바탕에 남색 글자 (쨍한 남색 바탕은 쓰지 않는다)
+[theme.sidebar]
+backgroundColor = "#F1F5FA"
+secondaryBackgroundColor = "#E9EFF7"
+codeBackgroundColor = "#E9EFF7"
+textColor = "#1B2240"
+borderColor = "#DCE5F0"
+primaryColor = "#1E2A5A"

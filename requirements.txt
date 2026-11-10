@@ -1,0 +1,25 @@
+# 이 프로젝트가 쓰는 파이썬 라이브러리 — 설치: python -m pip install -r requirements.txt
+# 웹 서버(Streamlit Cloud 등)에 올리면 이 파일을 보고 자동으로 설치한다
+# 지금 이 컴퓨터에서 확인한 버전 이상으로 적었다 (2026-11-10)
+
+# 화면
+streamlit>=1.65.0
+altair>=6.3.0
+
+# 자료 · 키 · 저장
+pandas>=3.0.6
+numpy>=2.5.3
+python-dotenv>=1.2.4
+supabase>=2.32.0
+requests>=2.34.2            # lunch.py 카카오 로컬 API
+
+# AI (링키 챗봇 · AI 미션 카드 · 보고서 요약)
+google-genai>=2.31.0
+
+# 멘토링 보고서 — 그래프 · 회귀 분석 · PDF · Word
+matplotlib>=3.11.2
+seaborn>=0.13.2
+statsmodels>=0.15.0
+scipy>=1.18.1
+fpdf2>=2.9.0
+python-docx>=1.2.0

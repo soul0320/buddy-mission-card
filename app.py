@@ -5,12 +5,34 @@ import os
 import random
 import re
 import time
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import io
+
+import altair as alt
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # 화면 없이 그림 파일로만 그린다 (서버용)
+import matplotlib.pyplot as plt
 import pandas as pd
+import seaborn as sns
+import statsmodels.formula.api as smf
+from scipy.stats import chi2_contingency
 import streamlit as st
+from matplotlib import font_manager
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.ticker import MaxNLocator
 from dotenv import load_dotenv
+# 멘토링 보고서 PDF — 한글 글꼴을 넣은 PDF를 만들고, 막대 그래프도 직접 그린다
+from fpdf import FPDF
+from fpdf.enums import XPos, YPos
+# 멘토링 보고서 Word(.docx) — 내려받아 Word 에서 고칠 수 있게
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.shared import Cm, Pt, RGBColor
 from google import genai
 from google.genai import types
 from supabase import create_client
@@ -56,6 +78,9 @@ st.markdown(
     <style>
     .block-container, [data-testid="stMainBlockContainer"] {
         max-width: 420px;
+        /* 넓은 화면에서 사이드바를 펼쳐도 본문이 오른쪽으로 쏠리지 않고 가운데에 오게 */
+        margin-left: auto !important;
+        margin-right: auto !important;
         padding-left: 16px;
         padding-right: 16px;
     }
@@ -89,6 +114,140 @@ st.markdown(
     /* 아이콘 옆의 펼침 화살표는 숨긴다 */
     .st-key-chatbot [data-testid="stPopoverButton"] svg {
         display: none;
+    }
+
+    /* ===== 유코마블 공통 디자인 — 색은 .streamlit/config.toml 테마와 같은 남색·하늘색·노랑·크림 ===== */
+    /* 바탕: 위쪽만 살짝 짙은 하늘색으로 번지게 */
+    .stApp {
+        background: linear-gradient(180deg, #E4F1FD 0px, #F6FAFF 260px) fixed;
+    }
+    /* 로고 글씨 — 흰 글자에 두꺼운 먹색 외곽선, 오른쪽 아래로 떨어지는 그림자 (시작 화면 제목과 같은 꼴) */
+    .yuco-logo {
+        font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+        font-weight: 900;
+        color: #FFFFFF;
+        -webkit-text-stroke: 6px #14182B;
+        paint-order: stroke fill;
+        text-shadow: 2px 4px 0 #14182B;
+        letter-spacing: .01em;
+        line-height: 1.15;
+    }
+    /* 화면 1~3 맨 위 머리 줄 — 작은 로고 + 서비스 이름 */
+    .yuco-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 4px 0 6px;
+    }
+    /* 작은 로고는 외곽선·그림자를 줄여야 글자 속 빈칸이 뭉개지지 않는다 */
+    .yuco-head .yuco-logo {
+        font-size: 26px;
+        -webkit-text-stroke: 4px #14182B;
+        text-shadow: 1.5px 3px 0 #14182B;
+    }
+    .yuco-head .yuco-tag {
+        background: #1E2A5A;
+        color: #FFD84D;
+        border-radius: 999px;
+        padding: 3px 11px;
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
+    }
+    /* 화면 제목(소제목) — 남색 굵은 글씨 */
+    [data-testid="stMainBlockContainer"] h3 {
+        color: #1E2A5A;
+        letter-spacing: -.01em;
+    }
+    /* 주 버튼 — 남색 바탕에 노란 글자, 살짝 뜬 그림자 */
+    [data-testid="stMainBlockContainer"] [data-testid="stBaseButton-primary"],
+    [data-testid="stDialog"] [data-testid="stBaseButton-primary"] {
+        box-shadow: 0 6px 14px rgba(30, 42, 90, .22);
+        border: none;
+    }
+    [data-testid="stMainBlockContainer"] [data-testid="stBaseButton-primary"] p,
+    [data-testid="stDialog"] [data-testid="stBaseButton-primary"] p {
+        color: #FFD84D;
+        font-weight: 800;
+    }
+    /* 아직 누를 수 없는 주 버튼 — 노란 글자는 회색 바탕에서 안 읽히므로 흐린 남색으로, 그림자도 뺀다 */
+    [data-testid="stMainBlockContainer"] [data-testid="stBaseButton-primary"]:disabled {
+        box-shadow: none;
+        background: #E3ECF7;
+    }
+    [data-testid="stMainBlockContainer"] [data-testid="stBaseButton-primary"]:disabled p {
+        color: rgba(27, 34, 64, .4);
+    }
+    /* 보조 버튼 — 흰 바탕, 남색 글자 */
+    [data-testid="stMainBlockContainer"] [data-testid="stBaseButton-secondary"] {
+        background: #FFFFFF;
+    }
+    [data-testid="stMainBlockContainer"] [data-testid="stBaseButton-secondary"] p {
+        color: #1E2A5A;
+        font-weight: 700;
+    }
+
+    /* ===== 사이드바 — 쨍한 남색 대신 옅은 안개빛 바탕에 흰 카드, 강조는 남색 글자 + 노란 형광펜 ===== */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #F5F8FC 0%, #EDF2F8 100%);
+        border-right: 1px solid #E1E8F1;
+    }
+    .yuco-side-brand { text-align: center; padding: 6px 0 2px; }
+    .yuco-side-brand .yuco-logo { font-size: 32px; }
+    .yuco-side-brand .yuco-side-en {
+        color: #8A97B8;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: .38em;
+        margin-top: 6px;
+    }
+    .yuco-side-card {
+        background: #FFFFFF;
+        border: 1px solid #E1E8F1;
+        border-radius: 16px;
+        padding: 14px 14px 12px;
+        margin-top: 14px;
+        font-size: 14px;
+        line-height: 1.6;
+        color: #3A4670;
+        box-shadow: 0 2px 10px rgba(30, 42, 90, .05);
+    }
+    .yuco-side-card b {
+        color: #1E2A5A;
+        background: linear-gradient(transparent 62%, #FFE9A8 62%);
+    }
+    .yuco-side-title {
+        color: #7584AA;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: .12em;
+        margin-bottom: 6px;
+    }
+    .yuco-side-title.side-report { margin: 18px 0 8px 2px; }
+    .yuco-side-steps { margin: 0; padding-left: 18px; }
+    .yuco-side-steps li { margin: 2px 0; }
+    /* 보고서 숫자 칸 — 한 줄에 4칸, 옅은 하늘색 바탕에 남색 숫자 */
+    .yuco-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 4px 0 14px; }
+    .yuco-kpi { background: #FFFFFF; border: 1px solid #DCE5F0; border-radius: 14px;
+        padding: 10px 6px 9px; text-align: center; box-shadow: 0 2px 8px rgba(30, 42, 90, .04); }
+    .yuco-kpi-l { font-size: 12px; color: #6B7BA6; font-weight: 700; }
+    .yuco-kpi-v { font-size: 19px; color: #1E2A5A; font-weight: 800; margin-top: 2px; }
+    /* 보고서 필터 카드 — 소개 카드와 같은 흰 카드 */
+    [data-testid="stSidebar"] .st-key-report_box {
+        background: #FFFFFF;
+        border-radius: 16px;
+        box-shadow: 0 2px 10px rgba(30, 42, 90, .05);
+    }
+    /* 사이드바 주 버튼 — 본문과 같은 남색 바탕에 노란 글자 */
+    [data-testid="stSidebar"] [data-testid="stBaseButton-primary"] p {
+        color: #FFD84D;
+        font-weight: 800;
+    }
+    [data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:disabled {
+        background: #E3ECF7;
+    }
+    [data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:disabled p {
+        color: rgba(27, 34, 64, .4);
     }
     </style>
     """,
@@ -155,9 +314,10 @@ CHILD_INFO = {
 ICEBREAK = missions_df[missions_df["mission_id"] == "M00"].iloc[0].to_dict()
 MISSIONS = [m for m in missions_df.to_dict("records") if m["mission_id"] != "M00"]
 
-# 지금 보고 있는 화면: "s1"(화면 1), "s1_1"(화면 1-1), "s2"(화면 2), "s2_1"(화면 2-1), "s3"(화면 3)
+# 지금 보고 있는 화면: "s_start"(시작 화면), "s1"(화면 1), "s1_1"(화면 1-1), "s2"(화면 2), "s2_1"(화면 2-1), "s3"(화면 3)
+# 앱을 열면 유코마블 표지(시작 화면)부터 나온다
 if "screen" not in st.session_state:
-    st.session_state.screen = "s1"
+    st.session_state.screen = "s_start"
 # 화면 위에 떠 있는 팝업: None, "p1"(팝업 1 — 이름 확인), "p2"(팝업 2 — 또래관계 체크 안내)
 if "popup" not in st.session_state:
     st.session_state.popup = None
@@ -229,12 +389,43 @@ def traits_of(name):
     return CHILD_INFO.get(name, {}).get("traits", [])
 
 
+def child_sort_key(name):
+    # "아동 A"~"아동 Z"는 알파벳 순서로 먼저, 그 밖의 이름은 가나다순으로 뒤에
+    m = re.fullmatch(r"아동 ([A-Z])", name)
+    return (0, m.group(1)) if m else (1, name)
+
+
+def next_child_name(children):
+    # [+ 이름 추가] 칸에 미리 넣을 이름 — 쓰지 않은 가장 앞 알파벳 (A~H가 있으면 "아동 I"), 다 쓰면 빈칸
+    used = {m.group(1) for n in children if (m := re.fullmatch(r"아동 ([A-Z])", n))}
+    return next((f"아동 {c}" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in used), "")
+
+
 def count_of(name):
     return st.session_state.mission_count.get(name, 0)
 
 
+def register_child(name):
+    # [+ 이름 추가]로 넣은 아동을 children.csv 에 이어 적는다 — 명단 번호 다음 번호(C08 다음이면 C09)를 준다
+    # 그래서 Supabase 에도 C09 처럼 명단과 같은 순서의 번호가 남고, 보고서에서도 실명으로 되돌릴 수 있다
+    # (성향·기피는 비워 둔다 — 성향 데이터가 없는 아동으로 보고 아이스브레이킹 카드가 나온다)
+    if name in NAME_TO_ID:
+        return NAME_TO_ID[name]
+    nums = [int(m.group(1)) for cid in NAME_TO_ID.values() if (m := re.fullmatch(r"C(\d+)", cid))]
+    child_id = f"C{max(nums, default=0) + 1:02d}"
+    path = DATA_DIR / "children.csv"
+    text = path.read_text(encoding="utf-8")
+    with path.open("a", encoding="utf-8", newline="") as f:
+        if text and not text.endswith("\n"):
+            f.write("\n")
+        f.write(f"{child_id},{name.replace(',', ' ')},,,0\n")
+    NAME_TO_ID[name] = child_id
+    load_data.clear()  # 다음 실행부터 새 명단을 읽는다
+    return child_id
+
+
 def id_of(name):
-    # children.csv의 child_id — 없으면 [+ 이름 추가]로 넣은 아동이라 임시 번호를 붙인다
+    # children.csv의 child_id — 명단에 없으면(예전 방식으로 넣은 아동) 임시 번호를 붙인다
     if name in NAME_TO_ID:
         return NAME_TO_ID[name]
     new_ids = st.session_state.new_ids
@@ -357,12 +548,108 @@ def set_mission(matchup):
     st.session_state.mission_started_at = time.time()
 
 
-st.caption("반응 기록은 Supabase에 저장됩니다.")
+# 시작 화면은 표지만 크게 보여 주고, 나머지 화면 위에만 안내 한 줄과 제목을 단다
+if st.session_state.screen != "s_start":
+    # 머리 줄 — 작은 유코마블 로고 + 서비스 이름 (시작 화면 표지와 같은 로고 꼴)
+    st.markdown(
+        '<div class="yuco-head"><span class="yuco-logo">유코마블</span>'
+        '<span class="yuco-tag">짝꿍 미션 카드</span></div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("반응 기록은 Supabase에 저장됩니다.")
 
-st.title("짝꿍 미션 카드")
+# 왼쪽 사이드바 — 로고, 이 서비스가 무엇을 해 주는지 한 줄 소개(PRD 한 줄 정의·목표 참고), 쓰는 순서
+st.sidebar.markdown(
+    '<div class="yuco-side-brand"><div class="yuco-logo">유코마블</div>'
+    '<div class="yuco-side-en">YUCO MARBLE</div></div>'
+    '<div class="yuco-side-card"><div class="yuco-side-title">짝꿍 미션 카드</div>'
+    '아이 성향에 맞는 <b>짝꿍 미션</b>과 <b>코칭 가이드</b>를 바로 보여 주고, '
+    '미션 직후 <b>1초 피드백</b>으로 다음 미션에 반영해 주는 멘토용 서비스입니다.</div>'
+    '<div class="yuco-side-card"><div class="yuco-side-title">쓰는 순서</div>'
+    '<ol class="yuco-side-steps"><li>참여 아동 전체 선택</li><li>칭찬 카드 쓰기</li>'
+    '<li>미션칸 도착 아동 선택</li><li>짝꿍 미션 · 코칭 가이드</li><li>또래관계 체크</li></ol></div>',
+    unsafe_allow_html=True,
+)
 
-# 왼쪽 사이드바 — 이 서비스가 무엇을 해 주는지 한 줄 소개 (PRD 한 줄 정의·목표 참고)
-st.sidebar.write("아이 성향에 맞는 짝꿍 미션과 코칭 가이드를 바로 보여 주고, 미션 직후 1초 피드백으로 다음 미션에 반영해 주는 멘토용 서비스입니다.")
+
+# 시작 화면 — 유코마블 사용설명서 표지 느낌: 하늘색 배경, 보드판 칸 테두리(START·FOOD·GAME·FINISH), 가운데 큰 제목
+# 칸 그림은 나라별 음식·놀이 이모지. 위 줄은 음식, 오른쪽은 건물·물건, 아래 줄은 놀이, 왼쪽은 화살표와 전통 물건
+COVER_TOP = ["START", "🍛", "🥐", "🍢", "🥘", "🍵", "FOOD"]
+COVER_RIGHT = ["🏛️", "🗝️", "⛺", "🐚", "🎲"]
+COVER_BOTTOM = ["GAME", "🪁", "🥁", "🧩", "🎐", "🪀", "FINISH"]
+COVER_LEFT = ["⬇️", "🪆", "🏮", "🪭", "⚖️"]
+COVER_CSS = """
+<style>
+.yuco { border-radius: 26px; overflow: hidden; padding: 16px 12px 18px;
+  background: linear-gradient(180deg, #4F9DE6 0%, #7DBDF3 55%, #A9D6FA 100%);
+  box-shadow: 0 18px 40px rgba(30, 42, 90, .28); }
+.yuco-band { text-align: center; color: #fff; font-weight: 800; font-size: 11px;
+  letter-spacing: .38em; opacity: .92; margin: 2px 0 12px; }
+.yuco-band.bottom { margin: 12px 0 0; letter-spacing: .12em; font-weight: 700; opacity: .85; }
+.yuco-board { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px;
+  background: rgba(30, 42, 90, .55); border: 1.5px solid #1E2A5A; border-radius: 8px; overflow: hidden; }
+.yt { aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+  background: #FFF5E1; font-size: 21px; }
+.yt.corner { background: #FFD84D; color: #1E2A5A; font-weight: 900; font-size: 10.5px; letter-spacing: .02em; }
+.yuco-center { grid-column: 2 / 7; grid-row: 2 / 7; position: relative;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  background: radial-gradient(circle at 50% 42%, #F4FBFF 0%, #D6EEFF 58%, #BCE1FA 100%); }
+.yuco-pill { background: #14182B; color: #fff; border-radius: 999px; padding: 4px 14px;
+  font-size: 12px; font-weight: 800; letter-spacing: .1em; }
+/* 제목 로고 — 흰 글자 + 두꺼운 먹색 외곽선(글자 뒤에 깔림) + 오른쪽 아래로 떨어지는 먹색 그림자 */
+.yuco-title { font-size: 50px; -webkit-text-stroke: 10px #14182B;
+  text-shadow: 3px 6px 0 #14182B, 0 14px 20px rgba(30, 42, 90, .25); }
+.yuco-sub { background: #1E2A5A; color: #FFD84D; border-radius: 999px; padding: 5px 14px;
+  font-size: 12px; font-weight: 800; white-space: nowrap; }
+.yuco-float { position: absolute; font-size: 30px; filter: drop-shadow(0 5px 6px rgba(30, 42, 90, .25));
+  animation: yuco-float 3.4s ease-in-out infinite; }
+.yuco-float.tiger { right: 8px; bottom: 6px; font-size: 38px; }
+.yuco-float.globe { left: 8px; top: 8px; font-size: 24px; animation-delay: -1.7s; }
+@keyframes yuco-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+@media (prefers-reduced-motion: reduce) { .yuco-float { animation: none; } }
+/* [유코마블 시작] 버튼 — 표지 제목과 같은 남색 바탕에 노란 글자 */
+.st-key-start_btn button { background: #1E2A5A !important; border: none !important; border-radius: 999px;
+  min-height: 56px; box-shadow: 0 10px 20px rgba(30, 42, 90, .3); }
+.st-key-start_btn button p { color: #FFD84D; font-size: 18px; font-weight: 800; letter-spacing: .04em; }
+.st-key-start_btn button:hover { background: #26356F !important; }
+</style>
+"""
+
+
+def cover_html():
+    # 7×7 보드판: 맨 위 줄 7칸, 맨 아래 줄 7칸, 양옆 5칸씩. 가운데 5×5 칸은 제목 자리
+    def tile(t):
+        return f'<div class="yt corner">{t}</div>' if t.isascii() else f'<div class="yt">{t}</div>'
+
+    cells = [tile(t) for t in COVER_TOP]
+    for row, (left, right) in enumerate(zip(COVER_LEFT, COVER_RIGHT), start=2):
+        cells.append(f'<div class="yt" style="grid-row:{row};grid-column:1">{left}</div>')
+        cells.append(f'<div class="yt" style="grid-row:{row};grid-column:7">{right}</div>')
+    cells.append(
+        '<div class="yuco-center">'
+        '<span class="yuco-float globe">🌏</span>'
+        '<span class="yuco-pill">다문화 보드게임</span>'
+        '<div class="yuco-logo yuco-title">유코마블</div>'
+        '<span class="yuco-sub">for. 다문화 감수성 강화 놀이</span>'
+        '<span class="yuco-float tiger">🐯</span>'
+        '</div>'
+    )
+    cells += [tile(t) for t in COVER_BOTTOM]
+    # 줄 앞 공백이 있으면 마크다운이 코드 블록으로 읽으므로 한 줄로 이어 붙인다
+    return (
+        '<div class="yuco"><div class="yuco-band">YUCO MARBLE</div>'
+        f'<div class="yuco-board">{"".join(cells)}</div>'
+        '<div class="yuco-band bottom">짝꿍 미션 카드</div></div>'
+    )
+
+
+def screen_start():
+    # 시작 화면 — 표지를 보여 주고 [유코마블 시작]을 누르면 화면 1(참여 아동 전체 선택)로 간다
+    st.markdown(COVER_CSS, unsafe_allow_html=True)
+    st.markdown(cover_html(), unsafe_allow_html=True)
+    st.write("")
+    st.button("유코마블 시작", type="primary", use_container_width=True,
+              on_click=go, args=("s1",), key="start_btn")
 
 
 def screen_1():
@@ -389,8 +676,10 @@ def screen_1():
             st.rerun()
     else:
         with add_cell.form("add_child", border=False):
+            # 이름 칸에는 다음 알파벳 이름(아동 H 다음이면 "아동 I")이 미리 들어 있다 — 그대로 [추가]하거나 고쳐 쓴다
             new_name = st.text_input(
-                "새로운 아동 이름", placeholder="이름을 입력하세요", label_visibility="collapsed"
+                "새로운 아동 이름", value=next_child_name(children),
+                placeholder="이름을 입력하세요", label_visibility="collapsed",
             )
             ok_col, cancel_col = st.columns(2)
             added = ok_col.form_submit_button("추가", type="primary", use_container_width=True)
@@ -403,9 +692,13 @@ def screen_1():
                 if not new_name:
                     st.error("이름을 입력해 주세요.")
                 elif new_name in children:
-                    st.error(f"'{new_name}'은(는) 이미 목록에 있습니다.")
+                    st.error(f"'{new_name}'{josa(new_name, '은')} 이미 목록에 있습니다.")
                 else:
+                    # 명단 파일에 다음 번호로 저장 — 새로고침하거나 다른 날 보고서를 만들어도 이름이 남는다
+                    register_child(new_name)
                     children.append(new_name)
+                    # 목록은 늘 ABCD(가나다) 순서로 — 새 아동도 맨 끝이 아니라 제자리에 들어간다
+                    children.sort(key=child_sort_key)
                     st.session_state.mission_count[new_name] = 0
                     st.session_state.adding_child = False
                     st.rerun()
@@ -614,7 +907,7 @@ def caution_lines():
 AI_RULES_FILE = Path(__file__).parent / "ai_rules.md"
 AI_RULE_NAMES = [
     "SAFE_RULE", "AI_CARD_RULE", "COUNTRY_CHECK_RULE",
-    "CHAT_FORMAT_RULE", "CHAT_FORMAT_REMINDER", "CHATBOT_RULE", "CHAT_TONES",
+    "CHAT_FORMAT_RULE", "CHAT_FORMAT_REMINDER", "CHATBOT_RULE", "CHAT_TONES", "REPORT_RULE",
 ]
 
 
@@ -658,6 +951,8 @@ def by_sentence(text):
 
 # AI 미션 카드 지시문 — 전체 이용가 규칙 뒤에 붙인다 (내용은 ai_rules.md)
 AI_CARD_RULE = SAFE_RULE + AI_RULES["AI_CARD_RULE"]
+# 멘토링 보고서의 AI 세 줄 요약·보고서 초안 지시문 (내용은 ai_rules.md)
+REPORT_RULE = SAFE_RULE + AI_RULES["REPORT_RULE"]
 
 # AI 미션 카드에 넣을 의식주·문화 요소를 고르는 체크 칸 (나라는 직접 적는다)
 AI_ELEMENTS = ["전통놀이", "음식", "인사말", "옷", "집", "명절"]
@@ -863,9 +1158,9 @@ def make_ai_card(countries, elements, extra):
         apply_ai_card(card, culture)
         log_ai_card(culture)
         st.session_state.chat.append(
-            ("assistant", f"미션 카드를 만들었어요! 화면의 미션 카드가 **{card['title']}**(으)로 바뀌었어요.")
+            ("assistant", f"미션 카드를 만들었어요! 화면의 미션 카드가 **{card['title']}**{josa(card['title'], '로')} 바뀌었어요.")
         )
-        st.success(f"화면의 미션 카드가 **{card['title']}**(으)로 바뀌었어요.")
+        st.success(f"화면의 미션 카드가 **{card['title']}**{josa(card['title'], '로')} 바뀌었어요.")
 
 
 def chat_card_maker():
@@ -897,7 +1192,7 @@ def chat_card_maker():
             # 알아본 나라(오타·다른 언어 포함)는 되묻지 않고 바로 만들고, 없는 나라가 있으면 만들지 않는다
             wrong = [n for n, c in zip(names, countries or []) if c is None]
             if wrong:
-                st.warning(f"{', '.join(wrong)}은(는) 있는 나라 이름으로 알아보지 못했어요.  \n나라 이름을 다시 적어 주세요.")
+                st.warning(f"{', '.join(wrong)}{josa(wrong[-1], '은')} 있는 나라 이름으로 알아보지 못했어요.  \n나라 이름을 다시 적어 주세요.")
             elif countries is not None:
                 make_ai_card(countries, elements, extra)
 
@@ -1006,7 +1301,7 @@ def screen_2():
     # 팀 도착인데 개인 미션이면 누가 할지 앱이 지정한다 — 아이들끼리 서로 하겠다고 다투지 않게
     waiting = waiting_children()
     if waiting:
-        st.info(f"이번 미션은 **{mu['team_a'][0]}** 차례입니다.  \n{', '.join(waiting)}은(는) 옆에서 응원해 주세요.")
+        st.info(f"이번 미션은 **{mu['team_a'][0]}** 차례입니다.  \n{', '.join(waiting)}{josa(waiting[-1], '은')} 옆에서 응원해 주세요.")
     with st.container(border=True):
         if mu["team_b"]:
             left, mid, right = st.columns([2, 1, 2], vertical_alignment="center")
@@ -1128,6 +1423,1384 @@ def records_csv(rows):
         for r in rows
     ]
     return pd.DataFrame(table).to_csv(index=False).encode("utf-8-sig")
+
+
+# ---------- 멘토링 보고서 (사이드바 → 보고서 화면) ----------
+# 게임 중인 화면 — 여기서는 [게임 끝내기]를 누르기 전까지 [멘토링 보고서 제작]이 잠긴다
+IN_GAME_SCREENS = {"s1_card", "s1_1", "s2", "s2_1", "s3"}
+REACTION_ORDER = ["좋음", "보통", "기피"]
+# 막대 색 — 유코마블 색으로, 좋음이 가장 진하게 (남색 · 하늘색 · 주황)
+REACTION_COLORS = ["#1E2A5A", "#7DBDF3", "#F2A65A"]
+REACTION_RGB = {"좋음": (30, 42, 90), "보통": (125, 189, 243), "기피": (242, 166, 90)}
+# 정량 분석용 반응 점수 — 좋음 2 · 보통 1 · 기피 0
+REACTION_SCORE = {"좋음": 2, "보통": 1, "기피": 0}
+# 미션 번호 → 미션 종류·난이도 (기록에는 미션 번호만 있어 missions.csv 에서 찾는다)
+MISSION_INFO = missions_df.set_index("mission_id")[["mission_type", "difficulty"]].to_dict("index")
+# 아동 번호 → 성향 목록 (children.csv) — 이름을 모르는 추가 아동은 성향도 없다
+TRAITS_BY_ID = {
+    row["child_id"]: [t for t in str(row["traits"]).split("|") if t and t != "nan"]
+    for _, row in children_df.iterrows()
+}
+# PDF 한글 글꼴 — 앞에서부터 먼저 있는 파일을 쓴다 (static/ 에 글꼴 파일을 넣으면 그것부터 쓴다)
+PDF_FONTS = [
+    (Path(__file__).parent / "static" / "report-regular.ttf", Path(__file__).parent / "static" / "report-bold.ttf"),
+    (Path("C:/Windows/Fonts/malgun.ttf"), Path("C:/Windows/Fonts/malgunbd.ttf")),
+    (Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf"), Path("/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf")),
+]
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def saved_finales():
+    # 피날레 칭찬 카드 릴레이 기록 — 표가 없거나 못 읽으면 빈 목록 (보고서는 반응 기록만으로도 만든다)
+    try:
+        return client.table(FINALE_TABLE).select("*").execute().data
+    except Exception:
+        return []
+
+
+def ended_records():
+    # 끝난 회차의 기록만 — 진행 중인 회차(지금 game_no)는 [게임 끝내기]를 누르기 전까지 보고서에 넣지 않는다
+    return [r for r in saved_reactions() if (r.get("game_no") or 0) < st.session_state.game_no]
+
+
+def record_day(r):
+    return datetime.fromisoformat(r["created_at"]).astimezone(KST).date()
+
+
+def range_label(mode, rng):
+    a, b = rng
+    if mode == "회기별":
+        return f"{a}차" if a == b else f"{a}차~{b}차"
+    return f"{a:%Y.%m.%d}" if a == b else f"{a:%Y.%m.%d}~{b:%Y.%m.%d}"
+
+
+def report_kind(kids):
+    # 아동 선택 수에 따라 보고서 종류 — 0명: 전체, 1명: 개인, 2명 이상: 관계
+    return "전체" if not kids else "개인" if len(kids) == 1 else "관계"
+
+
+def open_report(mode, rng, kids):
+    # [멘토링 보고서 제작] — 고른 범위·아동을 적어 두고 본문을 보고서 화면으로 바꾼다
+    label = range_label(mode, rng)
+    kind = report_kind(kids)
+    st.session_state.report = {
+        "mode": mode, "range": rng, "label": label, "kids": list(kids), "kind": kind,
+        "key": f"{mode}|{label}|{','.join(kids)}",
+    }
+    if st.session_state.screen != "s_report":
+        st.session_state.report_back = st.session_state.screen
+    go("s_report")
+
+
+# ---- 사이드바 범위 칸 맞추기 — 슬라이더·달력과 직접 입력 칸이 서로 같은 값을 보이게 한다 ----
+def sync_rounds_from_slider():
+    st.session_state.rep_r_from, st.session_state.rep_r_to = st.session_state.rep_r
+
+
+def sync_rounds_from_inputs():
+    a, b = sorted((st.session_state.rep_r_from, st.session_state.rep_r_to))
+    st.session_state.rep_r_from, st.session_state.rep_r_to = a, b
+    st.session_state.rep_r = (a, b)
+
+
+def sync_days_from_calendar():
+    picked = st.session_state.rep_d
+    if isinstance(picked, (tuple, list)) and len(picked) == 2:
+        st.session_state.rep_d_txt = f"{picked[0]:%Y/%m/%d}~{picked[1]:%Y/%m/%d}"
+        st.session_state.rep_d_err = None
+
+
+def sync_days_from_text(lo, hi):
+    # "2026/11/01~2026/11/10" (점·빗금·붙임표 모두 허용) 을 읽어 달력 칸에 넣는다 — 기록이 있는 날짜 범위로 맞춘다
+    m = re.fullmatch(
+        r"\s*(\d{4})[./-](\d{1,2})[./-](\d{1,2})\s*[~\-–]\s*(\d{4})[./-](\d{1,2})[./-](\d{1,2})\s*",
+        st.session_state.rep_d_txt,
+    )
+    try:
+        a, b = sorted((date(*map(int, m.group(1, 2, 3))), date(*map(int, m.group(4, 5, 6)))))
+    except (AttributeError, ValueError):
+        st.session_state.rep_d_err = "날짜를 2026/11/01~2026/11/10 처럼 적어 주세요."
+        return
+    a, b = max(a, lo), min(b, hi)
+    if a > b:
+        st.session_state.rep_d_err = f"기록이 있는 날짜는 {lo:%Y/%m/%d}~{hi:%Y/%m/%d} 이에요."
+        return
+    st.session_state.rep_d = (a, b)
+    st.session_state.rep_d_txt = f"{a:%Y/%m/%d}~{b:%Y/%m/%d}"
+    st.session_state.rep_d_err = None
+
+
+def round_controls(rounds):
+    # [회기별] — 슬라이더로 끌어서 고르거나, 아래 두 칸에 n회~nn회를 직접 적는다
+    ss = st.session_state
+    lo, hi = rounds[0], rounds[-1]
+    # 끝난 회차가 늘거나 줄었으면 저장된 값을 새 범위 안으로 맞춘다 (위젯을 그리기 전에만 바꿀 수 있다)
+    a, b = ss.get("rep_r", (lo, hi))
+    a, b = min(max(a, lo), hi), min(max(b, lo), hi)
+    if ss.get("rep_r") != (a, b):
+        ss.rep_r = (a, b)
+        ss.rep_r_from, ss.rep_r_to = a, b
+    ss.setdefault("rep_r_from", a)
+    ss.setdefault("rep_r_to", b)
+    st.slider("회차", lo, hi, key="rep_r", format="%d차", on_change=sync_rounds_from_slider)
+    c1, c2 = st.columns(2)
+    c1.number_input("시작 회차", lo, hi, step=1, key="rep_r_from", on_change=sync_rounds_from_inputs)
+    c2.number_input("끝 회차", lo, hi, step=1, key="rep_r_to", on_change=sync_rounds_from_inputs)
+    return ss.rep_r
+
+
+def day_controls(days):
+    # [기간별] — 달력에서 고르거나, 아래 칸에 nnnn/nn/nn~nnnn/nn/nn 을 직접 적는다
+    ss = st.session_state
+    lo, hi = days[0], days[-1]
+    cur = ss.get("rep_d")
+    if not (isinstance(cur, (tuple, list)) and len(cur) == 2 and lo <= cur[0] <= cur[1] <= hi):
+        if not (isinstance(cur, (tuple, list)) and len(cur) == 1):  # 끝 날짜를 고르는 중이면 그대로 둔다
+            ss.rep_d = (lo, hi)
+            ss.rep_d_txt = f"{lo:%Y/%m/%d}~{hi:%Y/%m/%d}"
+    ss.setdefault("rep_d_txt", f"{lo:%Y/%m/%d}~{hi:%Y/%m/%d}")
+    st.date_input("기간", min_value=lo, max_value=hi, format="YYYY/MM/DD", key="rep_d",
+                  on_change=sync_days_from_calendar)
+    st.text_input("직접 입력", key="rep_d_txt", placeholder="2026/11/01~2026/11/10",
+                  on_change=sync_days_from_text, args=(lo, hi))
+    if ss.get("rep_d_err"):
+        st.caption(ss.rep_d_err)
+    picked = ss.rep_d
+    if isinstance(picked, (tuple, list)) and len(picked) == 2:
+        return tuple(picked)
+    st.caption("끝 날짜도 골라 주세요.")
+    return None
+
+
+def report_sidebar():
+    # 사이드바 — [회기별](회차 범위) / [기간별](날짜) 필터, 아동 선택(검색·여러 명), [멘토링 보고서 제작] 버튼
+    with st.sidebar:
+        st.markdown('<div class="yuco-side-title side-report">멘토링 보고서</div>', unsafe_allow_html=True)
+        with st.container(border=True, key="report_box"):
+            try:
+                rows = ended_records()
+            except Exception:
+                rows = []
+                st.caption("기록을 불러오지 못했어요.  \n인터넷 연결을 확인해 주세요.")
+            mode = st.segmented_control(
+                "범위", ["회기별", "기간별"], default="회기별", key="rep_mode", width="stretch"
+            ) or "회기별"
+            rng = None
+            if not rows:
+                st.caption("아직 끝난 회차 기록이 없어요.")
+            elif mode == "회기별":
+                rounds = sorted({r["game_no"] for r in rows})
+                if len(rounds) == 1:
+                    st.caption(f"고를 수 있는 회차 : {rounds[0]}차")
+                    rng = (rounds[0], rounds[0])
+                else:
+                    rng = round_controls(rounds)
+            else:
+                rng = day_controls(sorted({record_day(r) for r in rows}))
+
+            # 아동 선택 — 비우면 전체, 1명이면 개인 리포트, 여러 명(AB, ABC …)이면 관계 리포트
+            ids = sorted({c for r in rows for c in child_list(r["child_ids"])})
+            by_name = {report_name(c): c for c in ids}
+            picked = st.multiselect(
+                "아동 선택", child_order(by_name), key="rep_kids",
+                placeholder="이름 검색 · 비우면 전체 보고서",
+            )
+            kind = report_kind(picked)
+            st.caption({"전체": "아동을 고르지 않으면 전체 보고서를 만들어요.",
+                        "개인": "개인 리포트 + 개인 맞춤 지도 코칭을 만들어요.",
+                        "관계": "고른 아동끼리의 상호 관계 리포트 + 관계 맞춤 지도 코칭을 만들어요."}[kind])
+            in_game = st.session_state.screen in IN_GAME_SCREENS
+            st.button(
+                "멘토링 보고서 제작", type="primary", use_container_width=True, key="report_btn",
+                disabled=in_game or rng is None, on_click=open_report,
+                args=(mode, rng, [by_name[n] for n in picked]),
+            )
+            if in_game:
+                st.caption("게임 진행 중이에요.  \n[게임 끝내기]를 누른 뒤 만들 수 있어요.")
+
+
+def report_name(child_id):
+    # 다른 날 [+ 이름 추가]로 넣은 아동은 이름을 알 수 없어 번호만 남는다 — "추가 아동 N01"로 보여 준다
+    name = name_of(child_id)
+    return f"추가 아동 {child_id}" if name == child_id else name
+
+
+def child_order(names):
+    # 명단 아동을 먼저(이름순), 이름을 모르는 추가 아동은 맨 뒤에
+    return sorted(names, key=lambda n: (n.startswith("추가 아동"), n))
+
+
+def report_data(rep):
+    # 고른 범위의 기록 — 반응(아동 한 명당 한 줄로 펼침), 스킵, 피날레, 회차 목록
+    a, b = rep["range"]
+    if rep["mode"] == "회기별":
+        rows = [r for r in ended_records() if a <= r["game_no"] <= b]
+    else:
+        rows = [r for r in ended_records() if a <= record_day(r) <= b]
+    rounds = sorted({r["game_no"] for r in rows})
+    finales = [f for f in saved_finales() if f.get("game_no") in rounds]
+    # 아동 한 명당 한 줄 — 정량 분석에 쓸 변수(미션 종류·난이도·인원·함께한 아동)도 함께 담는다
+    long = []
+    for i, r in enumerate(rows):
+        if r.get("feedback_type") == "skip" or r.get("reaction") not in REACTION_ORDER:
+            continue
+        kids = child_list(r["child_ids"])
+        info = MISSION_INFO.get(r.get("mission_id"), {})
+        for c in kids:
+            long.append({
+                "child_id": c, "아동": report_name(c), "회차": r["game_no"], "반응": r["reaction"],
+                "점수": REACTION_SCORE[r["reaction"]],
+                # AI 미션 카드는 missions.csv 에 없어 종류·난이도를 모른다
+                "미션종류": info.get("mission_type") or "AI·기타",
+                "난이도": info.get("difficulty") or "미정",
+                "인원": len(kids),
+                "기록": i,
+                "함께한": ",".join(k for k in kids if k != c),
+            })
+    df = pd.DataFrame(long, columns=["child_id", "아동", "회차", "반응", "점수", "미션종류", "난이도", "인원", "기록", "함께한"])
+    skips = [r for r in rows if r.get("feedback_type") == "skip"]
+    return rows, df, skips, finales, rounds
+
+
+def report_ai_input(rep, rows, df, skips, finales, rounds):
+    # Gemini에 보내는 기록 — 아동은 번호(child_id)로만 보낸다 (메모도 저장할 때 이미 번호로 바뀌어 있다)
+    out = [f"범위: {rep['mode']} {rep['label']}", "회차: " + ", ".join(f"{n}차" for n in rounds), "", "[아동별 회차별 반응]"]
+    for cid, g in df.groupby("child_id"):
+        parts = []
+        for n, gg in g.groupby("회차"):
+            c = gg["반응"].value_counts()
+            parts.append(f"{n}차 " + " ".join(f"{k}{c.get(k, 0)}" for k in REACTION_ORDER))
+        out.append(f"{cid}: " + " / ".join(parts))
+    skip_count = Counter(SKIP_LABELS.get(r.get("skip_reason"), "기타") for r in skips)
+    out += ["", "[스킵 이유]"] + ([f"{k} {v}번" for k, v in skip_count.items()] or ["없음"])
+    memos = [f"{r['game_no']}차: {r['memo']}" for r in rows if r.get("memo")][:30]
+    out += ["", "[멘토 메모]"] + (memos or ["없음"])
+    hes = [f"{f['game_no']}차: {', '.join(child_list(f.get('hesitant_ids'))) or '없음'}" for f in finales]
+    out += ["", "[피날레에서 머뭇거린 아동]"] + (hes or ["기록 없음"])
+    return "\n".join(out)
+
+
+def parse_report(text):
+    # "[요약]" 아래 '-' 세 줄, "[코칭]" 아래 '-' 줄들, "[초안]" 아래 문단으로 나눈다
+    def bullets(block):
+        # 줄 앞의 목록 표시(-, •, ·, "1." "2)")만 뗀다 — "1차부터"의 1 같은 글 속 숫자는 그대로 둔다
+        lines = [re.sub(r"^\s*(?:[-•·*]|\d+[.)])\s*", "", line).strip() for line in block.splitlines()]
+        return [line for line in lines if line]
+
+    head, _, draft = text.partition("[초안]")
+    summ, _, coach = head.partition("[코칭]")
+    return bullets(summ.replace("[요약]", ""))[:3], bullets(coach)[:4], draft.strip()
+
+
+def names_to_ids(lines, df):
+    # 정량 분석 문장의 아동 이름을 번호로 — Gemini 에는 실명을 보내지 않는다 (긴 이름부터 바꾼다)
+    pairs = dict(zip(df["아동"], df["child_id"]))
+    out = []
+    for line in lines:
+        for name in sorted(pairs, key=len, reverse=True):
+            line = line.replace(name, pairs[name])
+        out.append(line)
+    return out
+
+
+def make_report_text(rep, rows, df, skips, finales, rounds, stats_lines=(), focus_lines=()):
+    # AI 세 줄 요약 · 지도 코칭 · 보고서 초안 — 실패하거나 규칙에 어긋나면 (None, 이유)
+    kind, kids = rep.get("kind", "전체"), rep.get("kids", [])
+    focus = f"[보고서 종류] {kind}" + (f" — 대상: {', '.join(kids)}" if kids else " — 고른 범위의 아동 전체")
+    try:
+        ai = gemini()
+        with st.spinner("AI가 요약 · 지도 코칭 · 보고서 초안을 쓰는 중..."):
+            interaction = ai.interactions.create(
+                model=AI_MODEL,
+                system_instruction=REPORT_RULE,
+                input=report_ai_input(rep, rows, df, skips, finales, rounds)
+                + "\n\n[정량 분석 결과]\n" + "\n".join(stats_lines)
+                + "\n\n" + focus + ("\n[대상 지표]\n" + "\n".join(focus_lines) if focus_lines else ""),
+            )
+        out = (interaction.output_text or "").strip()
+    except Exception as e:
+        return None, friendly_ai_error(e, "AI 요약을 만들지 못해 기본 요약을 보여 드려요")
+    summary, coaching, draft = parse_report(out)
+    if len(summary) < 3 or len(coaching) < 2 or not draft or not is_safe(out):
+        return None, "AI 답이 형식에 맞지 않아 기본 요약을 보여 드려요."
+    return {"summary": summary, "coaching": coaching, "draft": draft, "ai": True}, None
+
+
+def fallback_report(rep, df, skips, finales, n_missions, c, focus_lines=(), coaching=()):
+    # AI를 못 쓸 때의 기본 요약·코칭·초안 — 기록 숫자만으로 만든다 (c = 미션 건수로 센 좋음·보통·기피)
+    kids = df["child_id"].nunique()
+    good = df[df["반응"] == "좋음"]["child_id"].value_counts()
+    top = f"{good.index[0]}({good.iloc[0]}번)" if len(good) else "아직 없습니다"
+    skip_count = Counter(SKIP_LABELS.get(r.get("skip_reason"), "기타") for r in skips)
+    skip_text = f" ({', '.join(f'{k} {v}번' for k, v in skip_count.items())})" if skip_count else ""
+    hes = {cid for f in finales for cid in child_list(f.get("hesitant_ids"))}
+    reactions = f"좋음 {c.get('좋음', 0)}건 · 보통 {c.get('보통', 0)}건 · 기피 {c.get('기피', 0)}건"
+    if focus_lines:
+        summary = list(focus_lines[:3])
+    else:
+        summary = [
+            f"{rep['label']} 동안 아동 {kids}명이 짝꿍 미션 {n_missions}건에 참여했고, 반응은 {reactions}이었습니다.",
+            f"'좋음'이 가장 많았던 아동은 {top}.",
+            f"스킵은 {len(skips)}번{skip_text}이었고, 피날레에서 머뭇거린 아동은 {len(hes)}명입니다.",
+        ]
+    draft = "\n\n".join([
+        f"{rep['label']} 동안 유코마블 보드게임과 짝꿍 미션 카드로 아동 {kids}명과 또래 상호작용 활동을 진행했습니다. "
+        f"짝꿍 미션은 모두 {n_missions}건이었습니다.",
+        f"미션 직후 멘토가 기록한 또래관계 반응은 {reactions}이었습니다."
+        + (" " + " ".join(focus_lines) if focus_lines else f" '좋음'이 가장 많았던 아동은 {top}."),
+        "다음 회기에는 " + (coaching[0] if coaching else "아직 낯설어하는 아동이 부담 없이 참여할 수 있는 짝꿍 미션을 이어 가겠습니다."),
+    ])
+    return {"summary": summary, "coaching": list(coaching), "draft": draft, "ai": False}
+
+
+# 받침 있는 말 뒤 / 없는 말 뒤에 붙는 조사 짝 — 긴 조사부터 찾도록 JOSA_RE 에서 길이순으로 묶는다
+JOSA_PAIRS = {
+    "과": ("과", "와"), "와": ("과", "와"), "은": ("은", "는"), "는": ("은", "는"),
+    "이": ("이", "가"), "가": ("이", "가"), "을": ("을", "를"), "를": ("을", "를"),
+    "이랑": ("이랑", "랑"), "랑": ("이랑", "랑"), "이나": ("이나", "나"), "나": ("이나", "나"),
+    "이와": ("과", "와"), "으로": ("으로", "로"), "로": ("으로", "로"),
+    "이에요": ("이에요", "예요"), "예요": ("이에요", "예요"), "이었다": ("이었다", "였다"), "였다": ("이었다", "였다"),
+}
+JOSA_RE = "|".join(sorted(JOSA_PAIRS, key=len, reverse=True))
+
+
+def final_consonant(word):
+    # 마지막 글자의 받침 — 없으면 "", ㄹ이면 "ㄹ", 그 밖의 받침은 "o"
+    # 한글은 글자 코드로, 영문 끝 글자(아동 A 등)는 읽는 소리(엘=ㄹ, 엠·엔=받침)로, 숫자도 읽는 소리로
+    last = word.strip()[-1:]
+    if "가" <= last <= "힣":
+        jong = (ord(last) - ord("가")) % 28
+        return "" if jong == 0 else "ㄹ" if jong == 8 else "o"
+    if last.upper() in "LR" or last in "178":
+        return "ㄹ"
+    if last.upper() in "MN" or last in "036":
+        return "o"
+    return ""
+
+
+def has_batchim(word):
+    return final_consonant(word) != ""
+
+
+def josa(word, particle):
+    # word 뒤에 붙일 조사를 받침에 맞춰 고른다 — josa("아동 A", "은") → "는", josa("민준", "로") → "으로"
+    pair = JOSA_PAIRS[particle]
+    if pair == ("으로", "로"):
+        # ㄹ 받침 뒤에는 '로' (서울로, 아동 L로)
+        return "으로" if final_consonant(word) == "o" else "로"
+    return pair[0 if has_batchim(word) else 1]
+
+
+def ids_to_names(text):
+    # 저장된 child_id(C01, N01 …)를 화면·PDF에 보여 줄 때만 실명으로 되돌린다 — 보고서와 [지난 대화 목록]에서 쓴다
+    # 긴 번호부터 바꾸고, 다른 번호 속 숫자는 건드리지 않는다. 모르는 번호는 번호 그대로
+    # 번호 뒤 조사는 실명 끝 글자에 맞춰 고친다 (C01과 → 아동 A와)
+    ids = set(NAME_TO_ID.values()) | set(st.session_state.new_ids.values())
+    for cid in sorted(ids, key=len, reverse=True):
+        name = name_of(cid)
+        # AI가 "C01 아동은"처럼 번호 뒤에 '아동'을 붙이면 "아동 A 아동은"이 되므로 '아동'을 뺀다
+        text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(cid)}(?![0-9])\s*아동", cid, text)
+
+        def swap(m, name=name):
+            particle = m.group(1)
+            return name + josa(name, particle) if particle else name
+
+        text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(cid)}(?![0-9])({JOSA_RE})?(?![가-힣])", swap, text)
+        # 조사 뒤에 한글이 바로 이어지는 경우(C01이랑 등)는 이름만 바꾼다
+        text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(cid)}(?![0-9])", name, text)
+    return text
+
+
+def find_pdf_font():
+    for regular, bold in PDF_FONTS:
+        if regular.exists():
+            return regular, bold if bold.exists() else regular
+    return None
+
+
+class ReportPDF(FPDF):
+    # 모든 쪽 아래에 서비스 이름과 쪽 번호 (n / 전체)
+    def footer(self):
+        self.set_y(-13)
+        self.set_font("KR", "", 8)
+        self.set_text_color(150, 160, 185)
+        self.cell(0, 6, f"유코마블 · 짝꿍 미션 카드   ·   {self.page_no()} / {{nb}}", align="C")
+
+
+def report_pdf(doc):
+    # 보고서 PDF — doc: 제목·부제·숫자 칸·요약·코칭·지표 표·정량 분석 문장·그림·보고서 글
+    # 여백 20mm, 문단 사이 간격을 넉넉히, 그림은 쪽을 넘기지 않게 크기를 맞춘다
+    regular, bold = find_pdf_font()
+    pdf = ReportPDF(format="A4")
+    pdf.set_margins(20, 20, 20)
+    pdf.set_auto_page_break(True, margin=22)
+    pdf.add_font("KR", "", str(regular))
+    pdf.add_font("KR", "B", str(bold))
+    pdf.add_page()
+    width = pdf.w - pdf.l_margin - pdf.r_margin
+    navy, ink, sub = (30, 42, 90), (27, 34, 64), (98, 112, 150)
+
+    def text(t, size=10.5, style="", color=ink, h=6.6, indent=0):
+        pdf.set_font("KR", style, size)
+        pdf.set_text_color(*color)
+        pdf.set_x(pdf.l_margin + indent)
+        pdf.multi_cell(width - indent, h, t, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    def section(title):
+        if pdf.get_y() > pdf.h - 55:
+            pdf.add_page()
+        pdf.ln(7)
+        text(title, 13, "B", navy, 8)
+        pdf.set_draw_color(205, 222, 241)
+        pdf.set_line_width(0.4)
+        pdf.line(pdf.l_margin, pdf.get_y() + 0.5, pdf.l_margin + width, pdf.get_y() + 0.5)
+        pdf.ln(4)
+
+    def bullets(items, numbered=False):
+        for i, s in enumerate(items, 1):
+            # 쪽 끝에 걸리면 점(•)만 남고 글이 다음 쪽으로 넘어가므로, 한 줄이 들어갈 자리가 없으면 먼저 쪽을 넘긴다
+            pdf.set_font("KR", "", 10.5)
+            need = 6.6 * max(1, len(pdf.multi_cell(width - 7, 6.6, s, dry_run=True, output="LINES")))
+            if pdf.get_y() + need > pdf.page_break_trigger:
+                pdf.add_page()
+            y = pdf.get_y()
+            pdf.set_font("KR", "B", 10.5)
+            pdf.set_text_color(*navy)
+            pdf.set_xy(pdf.l_margin, y)
+            pdf.cell(7, 6.6, f"{i}." if numbered else "•")
+            pdf.set_xy(pdf.l_margin + 7, y)
+            text(s, 10.5, "", ink, 6.6, indent=7)
+            pdf.ln(1.2)
+
+    # 머리 띠
+    pdf.set_fill_color(*navy)
+    pdf.rect(0, 0, pdf.w, 40, style="F")
+    pdf.set_xy(pdf.l_margin, 10)
+    text("유코마블 · 짝꿍 미션 카드", 10, "B", (255, 216, 77), 6)
+    text(doc["title"], 21, "B", (255, 255, 255), 12)
+    pdf.set_y(47)
+    text(doc["subtitle"], 10, "", sub, 6)
+
+    # 숫자 칸
+    kpis = doc["kpis"]
+    pdf.ln(4)
+    gap = 3.5
+    box_w = (width - gap * (len(kpis) - 1)) / len(kpis)
+    top = pdf.get_y()
+    for i, (label, value) in enumerate(kpis):
+        x = pdf.l_margin + i * (box_w + gap)
+        pdf.set_fill_color(234, 243, 252)
+        pdf.rect(x, top, box_w, 20, style="F", round_corners=True, corner_radius=3)
+        pdf.set_xy(x, top + 3)
+        pdf.set_font("KR", "", 8.5)
+        pdf.set_text_color(*sub)
+        pdf.cell(box_w, 4, label, align="C")
+        pdf.set_xy(x, top + 9)
+        pdf.set_font("KR", "B", 13.5)
+        pdf.set_text_color(*navy)
+        pdf.cell(box_w, 7, str(value), align="C")
+    pdf.set_y(top + 24)
+
+    section("AI 세 줄 요약")
+    bullets(doc["summary"])
+    if doc.get("coaching"):
+        section(doc.get("coaching_title", "지도 코칭"))
+        bullets(doc["coaching"], numbered=True)
+
+    table = doc.get("table")
+    if table and table["rows"]:
+        section(table["title"])
+        cols = len(table["header"])
+        widths = table.get("widths") or [width / cols] * cols
+        scale = width / sum(widths)
+        widths = [w * scale for w in widths]
+        pdf.set_font("KR", "B", 9)
+        pdf.set_fill_color(230, 240, 251)
+        pdf.set_text_color(*navy)
+        pdf.set_draw_color(214, 226, 240)
+        for w, h in zip(widths, table["header"]):
+            pdf.cell(w, 8, h, border=1, align="C", fill=True)
+        pdf.ln(8)
+        pdf.set_font("KR", "", 9)
+        pdf.set_text_color(*ink)
+        for row in table["rows"]:
+            if pdf.get_y() > pdf.h - 32:
+                pdf.add_page()
+            for w, v in zip(widths, row):
+                pdf.cell(w, 7.2, str(v), border=1, align="C")
+            pdf.ln(7.2)
+
+    if doc.get("figures"):
+        section("정량 분석")
+        text("반응 점수 : 좋음 2 · 보통 1 · 기피 0.  p < 0.05 이면 '유의미'. 기록이 적으면 결과가 흔들릴 수 있습니다.", 8.5, "", sub, 5)
+        pdf.ln(2)
+        if doc.get("stats"):
+            bullets(doc["stats"])
+        for title, png, ratio in doc["figures"]:
+            w = width if ratio >= 1.25 else width * 0.78
+            h = w / ratio
+            room = pdf.h - 22 - 30
+            if h > room:
+                w, h = room * ratio, room
+            if pdf.get_y() + h + 12 > pdf.h - 22:
+                pdf.add_page()
+            pdf.ln(3)
+            text(title, 10.5, "B", navy, 6.5)
+            pdf.ln(1)
+            pdf.image(io.BytesIO(png), x=pdf.l_margin + (width - w) / 2, w=w, h=h)
+            pdf.ln(3)
+
+    section("보고서")
+    for para in [p.strip() for p in doc["draft"].split("\n\n") if p.strip()]:
+        text(para, 10.5, "", ink, 7)
+        pdf.ln(3)
+
+    pdf.ln(4)
+    text("AI가 쓴 초안을 멘토가 확인·수정한 보고서입니다.  © 2026 짝꿍 미션 카드 · YUCO MARBLE", 8, "", (150, 160, 185), 5)
+    return bytes(pdf.output())
+
+
+def report_docx(doc):
+    # 같은 내용을 Word 파일로 — 내려받아 Word 에서 마음껏 고칠 수 있다
+    d = Document()
+    sec = d.sections[0]
+    for side in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
+        setattr(sec, side, Cm(2))
+    navy = RGBColor(0x1E, 0x2A, 0x5A)
+    font_name = "Malgun Gothic"
+    for style_name in ("Normal", "Title", "Heading 1", "Heading 2", "List Bullet", "List Number"):
+        style = d.styles[style_name]
+        style.font.name = font_name
+        style.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), font_name)
+    d.styles["Normal"].font.size = Pt(10.5)
+    for style_name in ("Title", "Heading 1", "Heading 2"):
+        d.styles[style_name].font.color.rgb = navy
+
+    p = d.add_paragraph("유코마블 · 짝꿍 미션 카드")
+    p.runs[0].font.size = Pt(9)
+    p.runs[0].font.color.rgb = RGBColor(0xB8, 0x8A, 0x00)
+    d.add_paragraph(doc["title"], style="Title")
+    sub = d.add_paragraph(doc["subtitle"])
+    sub.runs[0].font.color.rgb = RGBColor(0x62, 0x70, 0x96)
+
+    kpis = doc["kpis"]
+    t = d.add_table(rows=2, cols=len(kpis))
+    t.style = "Table Grid"
+    for i, (label, value) in enumerate(kpis):
+        t.cell(0, i).text = label
+        t.cell(1, i).text = str(value)
+        t.cell(1, i).paragraphs[0].runs[0].bold = True
+        for r in (0, 1):
+            t.cell(r, i).paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    d.add_heading("AI 세 줄 요약", level=1)
+    for s in doc["summary"]:
+        d.add_paragraph(s, style="List Bullet")
+    if doc.get("coaching"):
+        d.add_heading(doc.get("coaching_title", "지도 코칭"), level=1)
+        for s in doc["coaching"]:
+            d.add_paragraph(s, style="List Number")
+
+    table = doc.get("table")
+    if table and table["rows"]:
+        d.add_heading(table["title"], level=1)
+        tt = d.add_table(rows=1, cols=len(table["header"]))
+        tt.style = "Table Grid"
+        for i, h in enumerate(table["header"]):
+            tt.rows[0].cells[i].text = h
+            tt.rows[0].cells[i].paragraphs[0].runs[0].bold = True
+        for row in table["rows"]:
+            cells = tt.add_row().cells
+            for i, v in enumerate(row):
+                cells[i].text = str(v)
+
+    if doc.get("figures"):
+        d.add_heading("정량 분석", level=1)
+        d.add_paragraph("반응 점수 : 좋음 2 · 보통 1 · 기피 0.  p < 0.05 이면 '유의미'. 기록이 적으면 결과가 흔들릴 수 있습니다.")
+        for s in doc.get("stats", []):
+            d.add_paragraph(s, style="List Bullet")
+        for title, png, ratio in doc["figures"]:
+            d.add_heading(title, level=2)
+            d.add_picture(io.BytesIO(png), width=Cm(17 if ratio >= 1.25 else 13))
+            d.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    d.add_heading("보고서", level=1)
+    for para in [p.strip() for p in doc["draft"].split("\n\n") if p.strip()]:
+        d.add_paragraph(para)
+    sec.footer.paragraphs[0].text = "AI가 쓴 초안을 멘토가 확인·수정한 보고서입니다.  © 2026 짝꿍 미션 카드 · YUCO MARBLE"
+    buf = io.BytesIO()
+    d.save(buf)
+    return buf.getvalue()
+
+
+# ---------- 정량 분석 (회귀 분석 · 관계 · 성향) ----------
+# 반응 점수(좋음 2 · 보통 1 · 기피 0)를 결과로 두고 본다. p < 0.05 이면 '유의미'
+MIN_TREND_ROWS = 4      # 아동별 추세 회귀에 필요한 최소 기록 수
+SIG_LEVEL = 0.05
+SCORE_CMAP = LinearSegmentedColormap.from_list("yuco", ["#F2A65A", "#F6FAFF", "#1E2A5A"])
+
+
+def plot_style():
+    # seaborn 기본 꼴 + 유코마블 색, 한글 글꼴(PDF와 같은 글꼴)
+    sns.set_theme(style="whitegrid", rc={
+        "axes.edgecolor": "#C8DBF0", "grid.color": "#E6EEF7", "axes.labelcolor": "#1B2240",
+        "xtick.color": "#5B6B94", "ytick.color": "#5B6B94", "axes.titleweight": "bold",
+    })
+    font = find_pdf_font()
+    if font:
+        font_manager.fontManager.addfont(str(font[0]))
+        plt.rcParams["font.family"] = font_manager.FontProperties(fname=str(font[0])).get_name()
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+def fig_png(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def judge(slope, p, n):
+    if n < MIN_TREND_ROWS:
+        return "기록 부족"
+    if p != p:  # p 가 NaN — 반응이 늘 같아 기울기를 따질 수 없다
+        return "늘 같은 반응"
+    if p < SIG_LEVEL:
+        return "유의미하게 좋아짐 ▲" if slope > 0 else "유의미하게 낮아짐 ▼"
+    return "뚜렷한 변화 없음"
+
+
+@st.cache_data(show_spinner=False)
+def analyze(df):
+    # df: report_data 의 아동별 줄. 결과는 표(DataFrame)와 해석 문장들
+    out = {}
+
+    # 1) 아동별 추세 — 반응 점수 ~ 회차 (단순 선형 회귀)
+    trend = []
+    for child, g in df.groupby("아동"):
+        n, rounds = len(g), g["회차"].nunique()
+        slope = p = r2 = float("nan")
+        if n >= MIN_TREND_ROWS and rounds >= 2:
+            if g["점수"].nunique() > 1:
+                fit = smf.ols("score ~ rnd", data=pd.DataFrame({"score": g["점수"], "rnd": g["회차"]})).fit()
+                slope, p, r2 = fit.params["rnd"], fit.pvalues["rnd"], fit.rsquared
+            else:
+                slope = 0.0
+        trend.append({"아동": child, "기록": n, "회차 수": rounds, "평균 점수": g["점수"].mean(),
+                      "기울기(회차당)": slope, "p값": p, "R²": r2, "판정": judge(slope, p, n)})
+    out["trend"] = pd.DataFrame(trend).sort_values("아동", key=lambda s: s.map(lambda n: (n.startswith("추가 아동"), n)))
+
+    # 2) 다중 회귀 — 반응 점수 ~ 회차 + 미션 종류 + 난이도 + 성향(아동 2명 이상이 가진 성향만)
+    # 함께한 인원은 미션 종류와 겹치므로(개인 미션 = 늘 1명) 넣지 않는다
+    # AI 미션 카드 기록은 종류·난이도를 몰라 다중 회귀에서만 뺀다
+    known = df[df["미션종류"] != "AI·기타"]
+    data = pd.DataFrame({"score": known["점수"], "rnd": known["회차"],
+                         "mtype": known["미션종류"], "diff": known["난이도"]})
+    labels = {"rnd": "회차(1회차 늘 때)"}
+    trait_kids = Counter(t for cid in known["child_id"].unique() for t in TRAITS_BY_ID.get(cid, []))
+    terms = ["rnd"]
+    for i, (t, k) in enumerate(sorted(trait_kids.items())):
+        col = f"t{i}"
+        data[col] = known["child_id"].map(lambda c, t=t: int(t in TRAITS_BY_ID.get(c, [])))
+        if k >= 2 and 0 < data[col].mean() < 1:
+            terms.append(col)
+            labels[col] = f"성향: {t}"
+    # 미션 종류와 난이도가 거의 같이 움직이면(예: 개인=쉬움, 경쟁=어려움) 둘의 효과를 나눌 수 없다
+    # → 크라메르 V(두 범주 변수가 얼마나 겹치는지, 0~1)가 0.8 이상이면 난이도는 빼고 미션 종류만 넣는다
+    cat_vars = [("mtype", "미션 종류"), ("diff", "난이도")]
+    out["dropped_diff"] = None
+    table = pd.crosstab(data["mtype"], data["diff"])
+    if min(table.shape) >= 2:
+        chi2 = chi2_contingency(table, correction=False)[0]
+        v = (chi2 / (table.values.sum() * (min(table.shape) - 1))) ** 0.5
+        if v >= 0.8:
+            cat_vars = [("mtype", "미션 종류")]
+            out["dropped_diff"] = v
+    cats = []
+    for col, name in cat_vars:
+        levels = data[col].value_counts()
+        if len(levels) >= 2:
+            ref = "개인" if col == "mtype" and "개인" in levels else "쉬움" if col == "diff" and "쉬움" in levels else levels.index[0]
+            cats.append(f'C({col}, Treatment(reference="{ref}"))')
+            for lv in levels.index:
+                if lv != ref:
+                    labels[f'C({col}, Treatment(reference="{ref}"))[T.{lv}]'] = f"{name}: {lv} (기준 {ref})"
+    k = len(terms) + sum(data[c.split(",")[0][2:]].nunique() - 1 for c in cats)
+    fit = None
+    if len(data) >= k + 10 and data["score"].nunique() > 1:
+        fit = smf.ols("score ~ " + " + ".join(terms + cats), data=data).fit(cov_type="HC3")
+        # 변수끼리 완전히 겹치면(한 성향이 한 미션 종류에만 있는 등) 겹치는 성향부터 하나씩 빼고 다시 맞춘다
+        while np.linalg.matrix_rank(fit.model.exog) < fit.model.exog.shape[1] and len(terms) > 1:
+            terms.pop()
+            fit = smf.ols("score ~ " + " + ".join(terms + cats), data=data).fit(cov_type="HC3")
+        if np.linalg.matrix_rank(fit.model.exog) < fit.model.exog.shape[1]:
+            fit = None
+    if fit is not None:
+        ci = fit.conf_int()
+        coef = pd.DataFrame({
+            "변수": [labels.get(v, v) for v in fit.params.index], "계수": fit.params.values,
+            "하한": ci[0].values, "상한": ci[1].values, "p값": fit.pvalues.values,
+        })
+        out["coef"] = coef[coef["변수"] != "Intercept"].reset_index(drop=True)
+        out["model"] = {"n": int(fit.nobs), "r2": fit.rsquared, "adj_r2": fit.rsquared_adj,
+                        "ai_rows": int((df["미션종류"] == "AI·기타").sum())}
+    else:
+        out["coef"], out["model"] = None, {"n": len(data), "need": k + 10}
+
+    # 3) 관계 — 함께 미션한 두 아동의 평균 반응 점수 (같은 기록에 둘 다 있을 때)
+    pairs = []
+    for _, g in df.groupby("기록"):
+        names = sorted(g["아동"].unique())
+        score = g["점수"].iloc[0]
+        pairs += [(a, b, score) for i, a in enumerate(names) for b in names[i + 1:]]
+    if pairs:
+        pdf_ = pd.DataFrame(pairs, columns=["a", "b", "score"])
+        both = pd.concat([pdf_, pdf_.rename(columns={"a": "b", "b": "a"})])
+        out["pair_mean"] = both.pivot_table(index="a", columns="b", values="score", aggfunc="mean")
+        out["pair_n"] = both.pivot_table(index="a", columns="b", values="score", aggfunc="count")
+        top = pdf_.groupby(["a", "b"])["score"].agg(["mean", "count"]).reset_index()
+        out["pair_top"] = top[top["count"] >= 2].sort_values(["mean", "count"], ascending=False)
+    else:
+        out["pair_mean"] = None
+
+    # 4) 성향별 평균 반응 점수
+    rows = [(t, s) for cid, s in zip(df["child_id"], df["점수"]) for t in (TRAITS_BY_ID.get(cid) or ["성향 정보 없음"])]
+    out["traits"] = pd.DataFrame(rows, columns=["성향", "점수"])
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def analysis_figures(df):
+    # 정량 분석 그림 4장 — PNG 바이트와 가로·세로 비율. 화면과 PDF 모두 이 그림을 쓴다
+    a = analyze(df)
+    plot_style()
+    figs = {}
+    yt = dict(ticks=[0, 1, 2], labels=["기피", "보통", "좋음"])
+
+    # 1) 아동별 추세 — 점(기록), 꺾은선(회차 평균), 회귀선(95% 신뢰 구간)
+    kids = list(a["trend"]["아동"])
+    cols = 2
+    rows_n = -(-len(kids) // cols)
+    fig, axes = plt.subplots(rows_n, cols, figsize=(7, 2.3 * rows_n), squeeze=False, sharey=True)
+    for ax, (_, t) in zip(axes.flat, a["trend"].iterrows()):
+        g = df[df["아동"] == t["아동"]]
+        mean = g.groupby("회차")["점수"].mean()
+        ax.scatter(g["회차"], g["점수"] + (pd.Series(range(len(g)), index=g.index) % 3 - 1) * 0.04,
+                   s=14, color="#7DBDF3", alpha=.8, zorder=2)
+        ax.plot(mean.index, mean.values, color="#F2A65A", lw=1.6, marker="o", ms=3.5, zorder=3, label="회차 평균")
+        if t["판정"] not in ("기록 부족",) and g["회차"].nunique() >= 2:
+            sns.regplot(x=g["회차"], y=g["점수"], ax=ax, scatter=False, ci=95, truncate=True,
+                        line_kws={"color": "#1E2A5A", "lw": 2}, color="#1E2A5A")
+        mark = "▲" if "좋아짐" in t["판정"] else "▼" if "낮아짐" in t["판정"] else ""
+        p_txt = f"p={t['p값']:.3f}" if t["p값"] == t["p값"] else t["판정"]
+        ax.set_title(f"{t['아동']} {mark}  ({p_txt})", fontsize=10,
+                     color="#1E2A5A" if mark else "#5B6B94")
+        ax.set_yticks(**yt)
+        ax.set_ylim(-0.3, 2.3)
+        ax.set_xlabel("회차", fontsize=8)
+        ax.set_ylabel("")
+        ax.tick_params(labelsize=8)
+        # 회차는 1, 2, 3 … 정수만 (2.5 같은 눈금이 나오지 않게)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    for ax in list(axes.flat)[len(kids):]:
+        ax.axis("off")
+    fig.tight_layout()
+    figs["trend"] = (fig_png(fig), 7 / (2.3 * rows_n))
+
+    # 2) 다중 회귀 계수 — 점과 95% 신뢰 구간, 유의미한 변수는 남색
+    if a["coef"] is not None:
+        c = a["coef"].iloc[::-1]
+        fig, ax = plt.subplots(figsize=(7, 0.42 * len(c) + 1.1))
+        colors = ["#1E2A5A" if p < SIG_LEVEL else "#AAB6CC" for p in c["p값"]]
+        ax.hlines(range(len(c)), c["하한"], c["상한"], colors=colors, lw=2.2)
+        ax.scatter(c["계수"], range(len(c)), color=colors, s=36, zorder=3)
+        ax.axvline(0, color="#F2A65A", lw=1.2, ls="--")
+        ax.set_yticks(range(len(c)), [f"{v}{' *' if p < SIG_LEVEL else ''}" for v, p in zip(c["변수"], c["p값"])], fontsize=8.5)
+        ax.set_xlabel("반응 점수에 주는 영향 (계수, 95% 신뢰 구간)", fontsize=8.5)
+        fig.tight_layout()
+        figs["coef"] = (fig_png(fig), 7 / (0.42 * len(c) + 1.1))
+
+    # 3) 관계 히트맵 — 함께한 두 아동의 평균 반응 점수, 칸 안에 (함께한 횟수)
+    if a["pair_mean"] is not None:
+        m, n = a["pair_mean"], a["pair_n"]
+        order = sorted(set(m.index) | set(m.columns), key=lambda x: (x.startswith("추가 아동"), x))
+        m, n = m.reindex(index=order, columns=order), n.reindex(index=order, columns=order)
+        annot = m.round(1).astype(str).where(m.notna(), "") + n.fillna(0).astype(int).map(lambda v: f"\n({v})" if v else "")
+        size = max(4.2, 0.62 * len(order) + 1.6)
+        fig, ax = plt.subplots(figsize=(size, size * 0.86))
+        sns.heatmap(m, annot=annot, fmt="", cmap=SCORE_CMAP, vmin=0, vmax=2, center=1, linewidths=1, linecolor="white",
+                    cbar_kws={"label": "평균 반응 점수 (기피 0 · 보통 1 · 좋음 2)", "shrink": .7},
+                    annot_kws={"fontsize": 7.5}, ax=ax, square=True)
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.tick_params(labelsize=8)
+        fig.tight_layout()
+        figs["pairs"] = (fig_png(fig), size / (size * 0.86))
+
+    # 4) 성향별 평균 반응 점수 — 막대 + 표준오차
+    tr = a["traits"]
+    order = tr.groupby("성향")["점수"].mean().sort_values(ascending=False).index
+    fig, ax = plt.subplots(figsize=(7, 0.38 * len(order) + 1.2))
+    sns.barplot(data=tr, y="성향", x="점수", order=order, errorbar="se", color="#1E2A5A", ax=ax,
+                err_kws={"color": "#F2A65A", "linewidth": 1.5})
+    counts = tr["성향"].value_counts()
+    ax.set_yticks(range(len(order)), [f"{o}  (n={counts[o]})" for o in order], fontsize=8.5)
+    ax.set_xlim(0, 2.1)
+    ax.set_xlabel("평균 반응 점수 (기피 0 · 보통 1 · 좋음 2)", fontsize=8.5)
+    ax.set_ylabel("")
+    fig.tight_layout()
+    figs["traits"] = (fig_png(fig), 7 / (0.38 * len(order) + 1.2))
+    return figs
+
+
+def analysis_lines(a):
+    # 정량 분석을 짧은 문장으로 — 화면 해석, PDF, AI 입력에 함께 쓴다 (아동은 화면용 이름)
+    lines = []
+    sig = a["trend"][a["trend"]["판정"].str.startswith("유의미")]
+    if len(sig):
+        for _, t in sig.iterrows():
+            lines.append(f"{t['아동']}: 회차가 지날수록 반응 점수가 회차당 {t['기울기(회차당)']:+.2f}점 ({t['판정'][:-2]}, p={t['p값']:.3f}, 기록 {t['기록']}건)")
+    else:
+        lines.append("아동별 추세: 회차에 따라 유의미하게 바뀐 아동은 아직 없습니다 (p<0.05 기준).")
+    if a["coef"] is not None:
+        sig_c = a["coef"][a["coef"]["p값"] < SIG_LEVEL]
+        for _, c in sig_c.iterrows():
+            lines.append(f"다중 회귀 — {c['변수']}: 반응 점수 평균 {c['계수']:+.2f}점 (p={c['p값']:.3f})")
+        if not len(sig_c):
+            lines.append(f"다중 회귀: 유의미한 변수가 없습니다 (기록 {a['model']['n']}건, R²={a['model']['r2']:.2f}).")
+    else:
+        lines.append(f"다중 회귀: 기록이 {a['model']['n']}건이라 아직 분석하지 않았습니다 ({a['model']['need']}건 이상 필요).")
+    if a["pair_mean"] is not None and len(a["pair_top"]):
+        best = a["pair_top"].iloc[0]
+        lines.append(f"관계: {best['a']}·{best['b']} 짝이 함께한 {int(best['count'])}번의 평균 반응 점수가 {best['mean']:.2f}점으로 가장 높았습니다.")
+    return lines
+
+
+# ---------- 개인 리포트 · 관계 리포트 (아동 선택) ----------
+def record_sets(df):
+    # 기록(미션 한 건) → (그 미션에 참여한 아동 번호 집합, 반응 점수, 회차)
+    return {k: (set(g["child_id"]), g["점수"].iloc[0], g["회차"].iloc[0]) for k, g in df.groupby("기록")}
+
+
+def child_focus(df, skips, finales, a, cid):
+    # 개인 지표 — 참여 수, 평균 점수, 좋음·기피 비율, 추세(단순 회귀), 스킵, 머뭇거림, 미션 종류별·친구별 평균
+    g = df[df["child_id"] == cid]
+    name = report_name(cid)
+    tr = a["trend"].set_index("아동")
+    t = tr.loc[name] if name in tr.index else None
+    part = g.assign(p=g["함께한"].str.split(",")).explode("p")
+    part = part[part["p"].fillna("") != ""]
+    partners = part.groupby("p")["점수"].agg(["mean", "count"]).reset_index()
+    partners["아동"] = partners["p"].map(report_name)
+    types = g.groupby("미션종류")["점수"].agg(["mean", "count"]).reset_index()
+    return {
+        "name": name, "n": len(g), "rounds": g["회차"].nunique(),
+        "mean": g["점수"].mean() if len(g) else float("nan"),
+        "good": (g["반응"] == "좋음").mean() if len(g) else 0.0,
+        "avoid": (g["반응"] == "기피").mean() if len(g) else 0.0,
+        "slope": t["기울기(회차당)"] if t is not None else float("nan"),
+        "p": t["p값"] if t is not None else float("nan"),
+        "judge": t["판정"] if t is not None else "기록 부족",
+        "skips": sum(cid in child_list(r["child_ids"]) for r in skips),
+        "hesitant": sum(cid in child_list(f.get("hesitant_ids")) for f in finales),
+        "partners": partners.sort_values(["mean", "count"], ascending=False),
+        "types": types.sort_values(["mean", "count"], ascending=False),
+    }
+
+
+def relation_focus(df, ids):
+    # 관계 지표 — 고른 아동 둘씩: 함께한 횟수·함께 평균·각자 평균·시너지(함께 평균 − 각자 평균의 평균)
+    recs = record_sets(df)
+    means = df.groupby("child_id")["점수"].mean()
+    chosen = set(ids)
+    pairs = []
+    for i, x in enumerate(ids):
+        for y in ids[i + 1:]:
+            joint = [s for kids, s, _ in recs.values() if x in kids and y in kids]
+            base = (means.get(x, float("nan")) + means.get(y, float("nan"))) / 2
+            jm = sum(joint) / len(joint) if joint else float("nan")
+            pairs.append({"짝": f"{report_name(x)}·{report_name(y)}", "a": x, "b": y, "함께한 횟수": len(joint),
+                          "함께 평균": jm, "좋음 비율": (sum(s == 2 for s in joint) / len(joint)) if joint else float("nan"),
+                          "각자 평균": base, "시너지": jm - base})
+    group = [(rnd, s) for kids, s, rnd in recs.values() if len(kids & chosen) >= 2]
+    together_all = [s for kids, s, _ in recs.values() if chosen <= kids]
+    split = []
+    for c in ids:
+        alone = [s for kids, s, _ in recs.values() if c in kids and not (kids & chosen) - {c}]
+        withs = [s for kids, s, _ in recs.values() if c in kids and (kids & chosen) - {c}]
+        split.append({"아동": report_name(c), "따로": sum(alone) / len(alone) if alone else float("nan"), "따로 n": len(alone),
+                      "함께": sum(withs) / len(withs) if withs else float("nan"), "함께 n": len(withs)})
+    return {"pairs": pd.DataFrame(pairs), "group": group, "all": together_all, "split": pd.DataFrame(split)}
+
+
+def fmt(v, spec=".2f", empty="-"):
+    return empty if v is None or v != v else format(v, spec)
+
+
+def default_coaching(kind, m=None, r=None):
+    # AI를 못 쓸 때의 지도 코칭 — 기록 숫자에서 바로 뽑는다 (아이를 규정하지 않고, 해 볼 일 위주로)
+    if kind == "개인":
+        tips = []
+        best_t = m["types"][m["types"]["count"] >= 2].head(1)
+        if len(best_t):
+            bt = best_t.iloc[0]
+            tips.append(f"{m['name']}{josa(m['name'], '은')} '{bt['미션종류']}' 미션에서 반응이 가장 좋았어요(평균 {bt['mean']:.2f}점). 다음 회기 첫 미션으로 권해 보세요.")
+        best_p = m["partners"][m["partners"]["count"] >= 2].head(1)
+        if len(best_p):
+            bp = best_p.iloc[0]
+            tips.append(f"{bp['아동']}{josa(bp['아동'], '와')} 함께할 때 평균 {bp['mean']:.2f}점으로 잘 어울렸어요. 낯선 친구와 짝을 지을 때 {bp['아동']}{josa(bp['아동'], '을')} 다리 역할로 함께 넣어 보세요.")
+        if m["avoid"] > 0:
+            tips.append("기피가 나온 미션은 바로 다시 내기보다, 말 대신 몸짓·그림으로 답할 수 있는 합동 미션으로 천천히 이어 주세요.")
+        tips.append("미션이 끝나면 결과보다 시도한 순간을 짧게 짚어 칭찬해 주세요.")
+        return tips[:4]
+    if kind == "관계":
+        tips = []
+        p = r["pairs"].dropna(subset=["함께 평균"]).sort_values("시너지", ascending=False)
+        if len(p):
+            best = p.iloc[0]
+            tips.append(f"{best['짝']} 짝은 함께할 때 각자보다 {best['시너지']:+.2f}점이었어요. 새 미션을 시작할 때 이 짝을 먼저 묶어 분위기를 열어 주세요.")
+            worst = p.iloc[-1]
+            if len(p) > 1 and worst["시너지"] < 0:
+                tips.append(f"{worst['짝']} 짝은 아직 함께할 때 반응이 낮아요({worst['함께 평균']:.2f}점). 경쟁보다 합동 미션으로, 잘 어울리는 친구를 한 명 더 넣어 이어 주세요.")
+        if r["pairs"]["함께한 횟수"].eq(0).any():
+            tips.append("아직 함께한 적 없는 짝이 있어요. 부담이 적은 쉬움 난이도 합동 미션으로 첫 만남을 만들어 주세요.")
+        tips.append("미션 뒤에는 서로에게 고마웠던 점을 한 마디씩 나누게 해 관계를 이어 주세요.")
+        return tips[:4]
+    return ["'좋음'이 많았던 미션 종류를 다음 회기 앞쪽에 배치해 보세요.",
+            "기피가 나온 짝은 바로 다시 붙이기보다 합동 미션으로 천천히 이어 주세요.",
+            "'룰 미숙지' 스킵이 나온 미션은 시작 전에 규칙을 한 번 더 짧게 보여 주세요."]
+
+
+@st.cache_data(show_spinner=False)
+def fig_overall(df):
+    # 전체 보고서용 — 아동별 반응 수(가로 누적 막대)
+    plot_style()
+    ct = pd.crosstab(df["아동"], df["반응"]).reindex(columns=REACTION_ORDER, fill_value=0)
+    ct = ct.loc[child_order(ct.index)[::-1]]
+    fig, ax = plt.subplots(figsize=(8, 0.42 * len(ct) + 1.2))
+    left = pd.Series(0, index=ct.index)
+    for k, color in zip(REACTION_ORDER, REACTION_COLORS):
+        ax.barh(ct.index, ct[k], left=left, color=color, label=k, height=0.62)
+        left += ct[k]
+    ax.legend(ncol=3, loc="lower right", frameon=False, fontsize=8.5)
+    ax.set_xlabel("미션 수", fontsize=9)
+    ax.tick_params(labelsize=8.5)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    fig.tight_layout()
+    return fig_png(fig), 8 / (0.42 * len(ct) + 1.2)
+
+
+@st.cache_data(show_spinner=False)
+def fig_individual(df, cid):
+    # 개인 리포트 그림 4칸 — 추세(회귀), 회차별 반응, 미션 종류별 평균, 친구별 평균
+    plot_style()
+    g = df[df["child_id"] == cid]
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+    yt = dict(ticks=[0, 1, 2], labels=["기피", "보통", "좋음"])
+
+    ax = axes[0, 0]
+    mean = g.groupby("회차")["점수"].mean()
+    ax.scatter(g["회차"], g["점수"], s=18, color="#7DBDF3", alpha=.8, zorder=2)
+    ax.plot(mean.index, mean.values, color="#F2A65A", lw=1.8, marker="o", ms=4, zorder=3, label="회차 평균")
+    if len(g) >= MIN_TREND_ROWS and g["회차"].nunique() >= 2 and g["점수"].nunique() > 1:
+        sns.regplot(x=g["회차"], y=g["점수"], ax=ax, scatter=False, ci=95, truncate=True,
+                    line_kws={"color": "#1E2A5A", "lw": 2}, color="#1E2A5A")
+    ax.set_yticks(**yt)
+    ax.set_ylim(-0.3, 2.3)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_title("회차별 추세 (꺾은선 = 회차 평균, 남색 = 회귀선)", fontsize=10)
+    ax.set_xlabel("회차", fontsize=8.5)
+    ax.set_ylabel("")
+
+    ax = axes[0, 1]
+    ct = pd.crosstab(g["회차"], g["반응"]).reindex(columns=REACTION_ORDER, fill_value=0)
+    bottom = pd.Series(0, index=ct.index)
+    xs = [f"{n}차" for n in ct.index]
+    for k, color in zip(REACTION_ORDER, REACTION_COLORS):
+        ax.bar(xs, ct[k], bottom=bottom, color=color, label=k, width=0.6)
+        bottom += ct[k]
+    # 범례는 막대를 가리지 않게 그림 아래로
+    ax.legend(ncol=3, fontsize=8, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.1))
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_title("회차별 반응 수", fontsize=10)
+    ax.tick_params(axis="x", labelsize=7.5, rotation=0)
+
+    ax = axes[1, 0]
+    tm = g.groupby("미션종류")["점수"].agg(["mean", "count"]).sort_values("mean")
+    ax.barh(tm.index, tm["mean"], color="#1E2A5A", height=0.55)
+    for y, (v, n) in enumerate(zip(tm["mean"], tm["count"])):
+        ax.text(v + 0.04, y, f"{v:.2f} (n={n})", va="center", fontsize=8, color="#5B6B94")
+    ax.set_xlim(0, 2.6)
+    ax.set_title("미션 종류별 평균 반응 점수", fontsize=10)
+    ax.tick_params(labelsize=8.5)
+
+    ax = axes[1, 1]
+    part = g.assign(p=g["함께한"].str.split(",")).explode("p")
+    part = part[part["p"].fillna("") != ""]
+    if len(part):
+        pm = part.groupby("p")["점수"].agg(["mean", "count"])
+        pm.index = [report_name(c) for c in pm.index]
+        pm = pm.sort_values("mean")
+        ax.barh(pm.index, pm["mean"], color="#7DBDF3", height=0.55)
+        for y, (v, n) in enumerate(zip(pm["mean"], pm["count"])):
+            ax.text(v + 0.04, y, f"{v:.2f} (n={n})", va="center", fontsize=8, color="#5B6B94")
+        ax.set_xlim(0, 2.6)
+    else:
+        ax.text(0.5, 0.5, "함께한 친구 기록이 없어요", ha="center", va="center", transform=ax.transAxes, color="#5B6B94")
+        ax.axis("off")
+    ax.set_title("함께한 친구별 평균 반응 점수", fontsize=10)
+    ax.tick_params(labelsize=8.5)
+    fig.tight_layout(h_pad=2.2, w_pad=2)
+    return fig_png(fig), 10 / 7
+
+
+@st.cache_data(show_spinner=False)
+def fig_relation(df, ids):
+    # 관계 리포트 그림 4칸 — 짝 히트맵, 짝별 시너지, 함께한 미션 추세, 따로·함께 평균 비교
+    plot_style()
+    r = relation_focus(df, list(ids))
+    names = [report_name(c) for c in ids]
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7.4))
+
+    ax = axes[0, 0]
+    m = pd.DataFrame(index=names, columns=names, dtype=float)
+    n = pd.DataFrame(0, index=names, columns=names)
+    for _, p in r["pairs"].iterrows():
+        x, y = report_name(p["a"]), report_name(p["b"])
+        m.loc[x, y] = m.loc[y, x] = p["함께 평균"]
+        n.loc[x, y] = n.loc[y, x] = p["함께한 횟수"]
+    annot = m.round(1).astype(str).where(m.notna(), "") + n.map(lambda v: f"\n({v})" if v else "")
+    sns.heatmap(m, annot=annot, fmt="", cmap=SCORE_CMAP, vmin=0, vmax=2, center=1, linewidths=1, linecolor="white",
+                cbar=False, annot_kws={"fontsize": 9}, ax=ax, square=True)
+    ax.set_title("함께한 평균 반응 점수 (괄호 = 횟수)", fontsize=10)
+    ax.tick_params(labelsize=8.5)
+    ax.tick_params(axis="y", rotation=0)
+
+    ax = axes[0, 1]
+    p = r["pairs"].dropna(subset=["시너지"]).sort_values("시너지")
+    if len(p):
+        colors = ["#1E2A5A" if v >= 0 else "#F2A65A" for v in p["시너지"]]
+        ax.barh(p["짝"], p["시너지"], color=colors, height=0.55)
+        for y, (v, k) in enumerate(zip(p["시너지"], p["함께한 횟수"])):
+            ax.text(v + (0.03 if v >= 0 else -0.03), y, f"{v:+.2f} (n={k})", va="center",
+                    ha="left" if v >= 0 else "right", fontsize=8, color="#5B6B94")
+        ax.axvline(0, color="#AAB6CC", lw=1)
+        lim = max(0.6, p["시너지"].abs().max() + 0.45)
+        ax.set_xlim(-lim, lim)
+    else:
+        ax.text(0.5, 0.5, "함께한 기록이 아직 없어요", ha="center", va="center", transform=ax.transAxes, color="#5B6B94")
+        ax.axis("off")
+    ax.set_title("짝별 시너지 (함께 평균 - 각자 평균)", fontsize=10)
+    ax.tick_params(labelsize=8.5)
+
+    ax = axes[1, 0]
+    if r["group"]:
+        gdf = pd.DataFrame(r["group"], columns=["회차", "점수"])
+        gm = gdf.groupby("회차")["점수"].mean()
+        ax.scatter(gdf["회차"], gdf["점수"], s=18, color="#7DBDF3", alpha=.8)
+        ax.plot(gm.index, gm.values, color="#F2A65A", lw=1.8, marker="o", ms=4)
+        if len(gdf) >= MIN_TREND_ROWS and gdf["회차"].nunique() >= 2 and gdf["점수"].nunique() > 1:
+            sns.regplot(data=gdf, x="회차", y="점수", ax=ax, scatter=False, ci=95, truncate=True,
+                        line_kws={"color": "#1E2A5A", "lw": 2}, color="#1E2A5A")
+        ax.set_yticks([0, 1, 2], ["기피", "보통", "좋음"])
+        ax.set_ylim(-0.3, 2.3)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.set_ylabel("")
+    else:
+        ax.text(0.5, 0.5, "고른 아동이 함께한 미션이 없어요", ha="center", va="center", transform=ax.transAxes, color="#5B6B94")
+        ax.axis("off")
+    ax.set_title("고른 아동끼리 함께한 미션의 추세", fontsize=10)
+
+    ax = axes[1, 1]
+    s = r["split"]
+    ys = range(len(s))
+    ax.barh([y + 0.18 for y in ys], s["따로"].fillna(0), height=0.34, color="#C8DBF0", label="따로(고른 친구 없이)")
+    ax.barh([y - 0.18 for y in ys], s["함께"].fillna(0), height=0.34, color="#1E2A5A", label="함께(고른 친구와)")
+    ax.set_yticks(list(ys), s["아동"])
+    ax.set_xlim(0, 2.3)
+    # 범례는 막대를 가리지 않게 그림 아래로
+    ax.legend(fontsize=8, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.1), ncol=2)
+    ax.set_title("따로 할 때 vs 함께할 때 평균 반응 점수", fontsize=10)
+    ax.tick_params(labelsize=8.5)
+    fig.tight_layout(h_pad=2.2, w_pad=2)
+    return fig_png(fig), 10 / 7.4
+
+
+def kpi_tiles(kpis):
+    tiles = "".join(
+        f'<div class="yuco-kpi"><div class="yuco-kpi-l">{label}</div><div class="yuco-kpi-v">{value}</div></div>'
+        for label, value in kpis
+    )
+    cols = min(len(kpis), 6)
+    st.markdown(f'<div class="yuco-kpis" style="grid-template-columns:repeat({cols},1fr)">{tiles}</div>',
+                unsafe_allow_html=True)
+
+
+def screen_report():
+    # 보고서 화면 — 넓은 화면으로 펼치고, 탭으로 나눠 한눈에 본다
+    # 전체: 한눈에 / 아동별 추세 / 다중 회귀 / 관계·성향 / 보고서 편집
+    # 개인·관계: 한눈에 / 그래프 / 지도 코칭 / 보고서 편집
+    st.markdown("<style>[data-testid='stMainBlockContainer']{max-width:920px !important;}</style>", unsafe_allow_html=True)
+    st.button("← 돌아가기", on_click=go, args=(st.session_state.get("report_back", "s1"),), key="report_back_btn")
+    rep = st.session_state.get("report")
+    if not rep:
+        st.subheader("멘토링 보고서")
+        st.info("사이드바에서 범위를 고르고 [멘토링 보고서 제작]을 눌러 주세요.")
+        return
+    kind, kids = rep.get("kind", "전체"), rep.get("kids", [])
+    try:
+        rows, df, skips, finales, rounds = report_data(rep)
+    except Exception:
+        st.error("기록을 불러오지 못했어요.  \n인터넷 연결을 확인하고 다시 눌러 주세요.")
+        return
+    mission_rows = [r for r in rows if r.get("feedback_type") != "skip" and r.get("reaction") in REACTION_ORDER]
+    n_missions = len(mission_rows)
+    names = [report_name(c) for c in kids]
+    title = {"전체": "멘토링 보고서", "개인": f"{names[0] if names else ''} 개인 리포트",
+             "관계": f"{'·'.join(names)} 관계 리포트"}[kind]
+    subtitle = f"{rep['mode']} {rep['label']}  ·  {kind} 보고서" + (f"  ·  대상 {', '.join(names)}" if names else "")
+    st.subheader(title)
+    st.caption(subtitle + f"  ·  범위 안 미션 {n_missions}건 · 스킵 {len(skips)}건")
+    if df.empty:
+        st.warning("고른 범위에 반응 기록이 없어요.  \n사이드바에서 범위를 바꿔 주세요.")
+        return
+
+    a = analyze(df)
+    figs = analysis_figures(df)
+    lines = analysis_lines(a)
+    counts = Counter(r["reaction"] for r in mission_rows)
+
+    # 종류별 숫자 칸 · 지표 표 · 대상 지표 문장 · 그림
+    m = r = None
+    if kind == "개인":
+        m = child_focus(df, skips, finales, a, kids[0])
+        if not m["n"]:
+            st.warning(f"{m['name']}{josa(m['name'], '은')} 고른 범위에 반응 기록이 없어요.")
+            return
+        trend_txt = "▲ 좋아짐" if "좋아짐" in m["judge"] else "▼ 낮아짐" if "낮아짐" in m["judge"] else "변화 없음" if m["judge"] == "뚜렷한 변화 없음" else m["judge"]
+        kpis = [("참여 미션", f"{m['n']}건"), ("평균 점수", fmt(m["mean"])), ("좋음 비율", f"{m['good']:.0%}"),
+                ("기피 비율", f"{m['avoid']:.0%}"), ("추세", trend_txt), ("스킵", f"{m['skips']}번")]
+        table = {"title": "개인 지표", "header": ["지표", "값", "설명"], "widths": [3.2, 3.4, 5.4], "rows": [
+            ["참여 미션", f"{m['n']}건 ({m['rounds']}회차)", "고른 범위에서 반응을 기록한 미션 수"],
+            ["평균 반응 점수", fmt(m["mean"]), "좋음 2 · 보통 1 · 기피 0 의 평균"],
+            ["좋음 / 기피 비율", f"{m['good']:.0%} / {m['avoid']:.0%}", "전체 미션 중 비율"],
+            ["회차당 기울기", fmt(m["slope"], "+.3f"), "회차가 하나 늘 때 점수 변화 (단순 회귀)"],
+            ["p값 · 판정", f"{fmt(m['p'], '.3f')} · {m['judge']}", "p < 0.05 면 유의미"],
+            ["스킵 / 피날레 머뭇거림", f"{m['skips']}번 / {m['hesitant']}번", "미션을 넘긴 횟수 / 칭찬 카드 릴레이"],
+        ] + [[f"미션 종류: {t['미션종류']}", f"{t['mean']:.2f}", f"{int(t['count'])}건"] for _, t in m["types"].iterrows()]
+          + [[f"함께한 친구: {p['아동']}", f"{p['mean']:.2f}", f"{int(p['count'])}번 함께"] for _, p in m["partners"].head(5).iterrows()]}
+        focus_lines = [
+            f"{m['name']}: 참여 미션 {m['n']}건, 평균 반응 점수 {fmt(m['mean'])}점, 좋음 {m['good']:.0%} · 기피 {m['avoid']:.0%}.",
+            f"{m['name']}의 회차별 추세: 회차당 {fmt(m['slope'], '+.3f')}점 (p={fmt(m['p'], '.3f')}, {m['judge']}).",
+        ]
+        # '가장 좋았던' 것은 2건 이상인 것 중에서 고른다 (1건짜리는 우연일 수 있다) — 없으면 1건짜리라도 쓴다
+        types2 = m["types"][m["types"]["count"] >= 2]
+        if len(m["types"]):
+            bt = (types2 if len(types2) else m["types"]).iloc[0]
+            focus_lines.append(f"{m['name']}의 반응이 가장 좋았던 미션 종류: {bt['미션종류']} (평균 {bt['mean']:.2f}점, {int(bt['count'])}건).")
+        partners2 = m["partners"][m["partners"]["count"] >= 2]
+        if len(m["partners"]):
+            bp = (partners2 if len(partners2) else m["partners"]).iloc[0]
+            focus_lines.append(f"{m['name']}{josa(m['name'], '과')} 가장 잘 어울린 친구: {bp['아동']} (함께 {int(bp['count'])}번, 평균 {bp['mean']:.2f}점).")
+        focus_lines.append(f"스킵 {m['skips']}번, 피날레 머뭇거림 {m['hesitant']}번.")
+        focus_fig = ("개인 그래프", *fig_individual(df, kids[0]))
+        coaching_title = "개인 맞춤 지도 코칭"
+        default_tips = default_coaching("개인", m=m)
+    elif kind == "관계":
+        r = relation_focus(df, kids)
+        gm = sum(s for _, s in r["group"]) / len(r["group"]) if r["group"] else float("nan")
+        best = r["pairs"].dropna(subset=["시너지"]).sort_values("시너지", ascending=False)
+        kpis = [("고른 아동", f"{len(kids)}명"), ("함께한 미션", f"{len(r['group'])}건"), ("함께 평균", fmt(gm)),
+                ("모두 함께", f"{len(r['all'])}건"), ("최고 시너지", best.iloc[0]["짝"] if len(best) else "-")]
+        table = {"title": "관계 지표 (짝별)", "header": ["짝", "함께한 횟수", "함께 평균", "좋음 비율", "각자 평균", "시너지"],
+                 "widths": [3, 2, 2, 2, 2, 2], "rows": [
+                     [p["짝"], f"{int(p['함께한 횟수'])}번", fmt(p["함께 평균"]),
+                      "-" if p["좋음 비율"] != p["좋음 비율"] else f"{p['좋음 비율']:.0%}", fmt(p["각자 평균"]), fmt(p["시너지"], "+.2f")]
+                     for _, p in r["pairs"].iterrows()]}
+        focus_lines = [f"고른 아동 {len(kids)}명이 둘 이상 함께한 미션 {len(r['group'])}건, 평균 반응 점수 {fmt(gm)}점, 모두 함께한 미션 {len(r['all'])}건."]
+        for _, p in r["pairs"].iterrows():
+            focus_lines.append(f"{p['짝']}: 함께 {int(p['함께한 횟수'])}번, 함께 평균 {fmt(p['함께 평균'])}점, 각자 평균 {fmt(p['각자 평균'])}점, 시너지 {fmt(p['시너지'], '+.2f')}.")
+        for _, s in r["split"].iterrows():
+            focus_lines.append(f"{s['아동']}: 고른 친구 없이 {fmt(s['따로'])}점({int(s['따로 n'])}건) / 고른 친구와 {fmt(s['함께'])}점({int(s['함께 n'])}건).")
+        focus_fig = ("관계 그래프", *fig_relation(df, tuple(kids)))
+        coaching_title = "관계 맞춤 지도 코칭"
+        default_tips = default_coaching("관계", r=r)
+    else:
+        kpis = [("미션", f"{n_missions}건")] + [(k, f"{counts.get(k, 0)}건") for k in REACTION_ORDER]
+        tr = a["trend"]
+        table = {"title": "아동별 지표", "header": ["아동", "기록", "평균 점수", "회차당 기울기", "p값", "판정"],
+                 "widths": [3, 1.6, 2, 2.4, 1.8, 3.4], "rows": [
+                     [t["아동"], f"{t['기록']}건", fmt(t["평균 점수"]), fmt(t["기울기(회차당)"], "+.3f"), fmt(t["p값"], ".3f"), t["판정"]]
+                     for _, t in tr.iterrows()]}
+        focus_lines = []
+        focus_fig = None
+        coaching_title = "다음 회기 지도 코칭"
+        default_tips = default_coaching("전체")
+
+    kpi_tiles(kpis)
+
+    # AI 요약 · 코칭 · 초안 — 범위·아동마다 한 번만 만든다 (다시 그릴 때 Gemini를 또 부르지 않게)
+    cache = st.session_state.setdefault("report_ai", {})
+    if rep["key"] not in cache:
+        result, note = make_report_text(rep, rows, df, skips, finales, rounds,
+                                        names_to_ids(lines, df), names_to_ids(focus_lines, df))
+        if result is None:
+            result = fallback_report(rep, df, skips, finales, n_missions, counts, focus_lines, default_tips)
+            result["note"] = note
+        cache[rep["key"]] = result
+    res = cache[rep["key"]]
+    summary = [ids_to_names(s) for s in res["summary"]]
+    coaching = [ids_to_names(s) for s in res.get("coaching") or default_tips]
+    ai_note = "AI가 쓴 초안입니다." if res.get("ai") else res.get("note") or "기록 숫자로 만든 기본 요약입니다."
+
+    def summary_box():
+        with st.container(border=True):
+            st.markdown("**AI 세 줄 요약**")
+            for s in summary:
+                st.markdown(f"- {s}")
+            st.caption(ai_note)
+            if not res.get("ai"):
+                st.button("AI 요약 다시 만들기", on_click=lambda: cache.pop(rep["key"], None), key="report_retry")
+
+    def table_view():
+        st.dataframe(pd.DataFrame(table["rows"], columns=table["header"]), hide_index=True, width="stretch")
+
+    scale = alt.Scale(domain=REACTION_ORDER, range=REACTION_COLORS)
+    legend = alt.Legend(orient="top", title=None)
+
+    if kind == "전체":
+        tabs = st.tabs(["한눈에", "아동별 추세", "다중 회귀", "관계·성향", "보고서 편집"])
+        with tabs[0]:
+            left, right = st.columns([1, 1], gap="medium")
+            with left:
+                summary_box()
+                with st.container(border=True):
+                    st.markdown("**정량 분석 핵심**")
+                    for line in lines:
+                        st.markdown(f"- {line}")
+            with right, st.container(border=True):
+                st.markdown("**아동별 반응**")
+                overall = df.groupby(["아동", "반응"]).size().reset_index(name="횟수")
+                overall["순서"] = overall["반응"].map(REACTION_ORDER.index)
+                st.altair_chart(
+                    alt.Chart(overall).mark_bar(cornerRadius=3).encode(
+                        y=alt.Y("아동:N", title=None, sort=child_order(overall["아동"].unique())),
+                        x=alt.X("횟수:Q", title="미션 수", axis=alt.Axis(tickMinStep=1)),
+                        color=alt.Color("반응:N", scale=scale, legend=legend),
+                        order=alt.Order("순서:Q"), tooltip=["아동", "반응", "횟수"],
+                    ), width="stretch",
+                )
+        with tabs[1]:
+            st.image(figs["trend"][0], width="stretch")
+            st.caption("점 = 미션 한 건, 주황 꺾은선 = 회차 평균, 남색 선 = 회귀선(옅은 띠는 95% 신뢰 구간).  \n"
+                       f"기록이 {MIN_TREND_ROWS}건 미만인 아동은 회귀선을 긋지 않아요.")
+            table_view()
+        with tabs[2]:
+            if "coef" in figs:
+                st.image(figs["coef"][0], width="stretch")
+                mm = a["model"]
+                st.caption(f"반응 점수 ~ 회차 + 미션 종류 + 난이도 + 성향(아동 2명 이상이 가진 성향).  \n"
+                           f"기록 {mm['n']}건 · R² {mm['r2']:.2f} (보정 R² {mm['adj_r2']:.2f}) · 표준오차 HC3.  \n"
+                           + (f"종류·난이도를 모르는 AI 미션 카드 기록 {mm['ai_rows']}건은 다중 회귀에서만 뺐어요.  \n" if mm["ai_rows"] else "")
+                           + (f"난이도는 미션 종류와 거의 겹쳐(크라메르 V {a['dropped_diff']:.2f}) 효과를 나눌 수 없어 넣지 않았어요.  \n"
+                              if a["dropped_diff"] else "")
+                           + "점이 주황 점선(0)보다 오른쪽이면 반응이 좋아지는 쪽, 왼쪽이면 낮아지는 쪽이에요. * = 유의미.")
+                st.dataframe(a["coef"], hide_index=True, width="stretch",
+                             column_config={c: st.column_config.NumberColumn(format="%+.3f") for c in ["계수", "하한", "상한"]}
+                             | {"p값": st.column_config.NumberColumn(format="%.3f")})
+            else:
+                st.info(f"다중 회귀는 기록이 {a['model']['need']}건 이상 쌓이면 보여 드려요.  \n지금 {a['model']['n']}건이에요.")
+        with tabs[3]:
+            c1, c2 = st.columns(2, gap="medium")
+            with c1:
+                if "pairs" in figs:
+                    st.image(figs["pairs"][0], width="stretch")
+                    st.caption("칸 숫자 = 두 아동이 함께한 미션의 평균 반응 점수, (괄호) = 함께한 횟수.")
+            with c2:
+                st.image(figs["traits"][0], width="stretch")
+                st.caption("성향별 평균 반응 점수 (주황 선 = 표준오차, n = 기록 수).")
+        edit_tab = tabs[4]
+        doc_figs = [("아동별 반응 수", *fig_overall(df)),
+                    ("아동별 추세 (단순 선형 회귀 · 꺾은선 = 회차 평균)", *figs["trend"])]
+        if "coef" in figs:
+            doc_figs.append(("다중 회귀 계수 (95% 신뢰 구간, * = 유의미)", *figs["coef"]))
+        if "pairs" in figs:
+            doc_figs.append(("관계 — 함께한 두 아동의 평균 반응 점수", *figs["pairs"]))
+        doc_figs.append(("성향별 평균 반응 점수", *figs["traits"]))
+        doc_stats = lines
+    else:
+        tabs = st.tabs(["한눈에", "그래프", "지도 코칭", "보고서 편집"])
+        with tabs[0]:
+            left, right = st.columns([1, 1], gap="medium")
+            with left:
+                summary_box()
+            with right, st.container(border=True):
+                st.markdown(f"**{table['title']}**")
+                table_view()
+        with tabs[1]:
+            st.image(focus_fig[1], width="stretch")
+            st.caption("반응 점수 : 좋음 2 · 보통 1 · 기피 0.  꺾은선 = 회차 평균, 남색 선 = 회귀선(옅은 띠는 95% 신뢰 구간).  \n"
+                       + ("시너지 = 두 아동이 함께한 미션의 평균 − 두 아동 각자의 평균.  남색 = 함께할 때 더 좋음, 주황 = 아직 낯설어함."
+                          if kind == "관계" else "n = 미션 수. 기록이 적으면 결과가 크게 흔들릴 수 있어요."))
+            for line in focus_lines:
+                st.markdown(f"- {line}")
+        with tabs[2]:
+            with st.container(border=True):
+                st.markdown(f"**{coaching_title}**")
+                for i, tip in enumerate(coaching, 1):
+                    st.markdown(f"{i}. {tip}")
+                st.caption(ai_note if res.get("ai") else "기록 숫자로 만든 기본 코칭이에요.")
+        edit_tab = tabs[3]
+        doc_figs = [(focus_fig[0], focus_fig[1], focus_fig[2])]
+        doc_stats = focus_lines
+
+    # 보고서 편집 — 제목·요약·코칭·본문을 고친 뒤 PDF 또는 Word 로 내려받는다
+    with edit_tab:
+        k = rep["key"]
+        defaults = {f"ed_title_{k}": title, f"ed_sum_{k}": "\n".join(summary),
+                    f"ed_coach_{k}": "\n".join(coaching), f"ed_draft_{k}": ids_to_names(res["draft"])}
+        for key, value in defaults.items():
+            st.session_state.setdefault(key, value)
+        st.caption("PDF·Word 에 들어갈 글을 여기서 고쳐요. 고친 뒤 칸 밖을 한 번 누르면 저장돼요.  \n"
+                   "Word 로 내려받으면 그림까지 넣은 채로 Word 에서 더 고칠 수 있어요.")
+        st.text_input("보고서 제목", key=f"ed_title_{k}")
+        c1, c2 = st.columns(2, gap="medium")
+        c1.text_area("AI 세 줄 요약 (한 줄에 하나)", key=f"ed_sum_{k}", height=150)
+        c2.text_area(f"{coaching_title} (한 줄에 하나)", key=f"ed_coach_{k}", height=150)
+        st.text_area("보고서 본문 (빈 줄로 문단 나누기)", key=f"ed_draft_{k}", height=260)
+        with_figs = st.checkbox("그래프·정량 분석 넣기", value=True, key=f"ed_figs_{k}")
+
+        def split_lines(text):
+            return [line.strip().lstrip("-•· ").strip() for line in text.splitlines() if line.strip()]
+
+        doc = {
+            "title": st.session_state[f"ed_title_{k}"].strip() or title,
+            "subtitle": subtitle + f"  ·  만든 날 {datetime.now(KST):%Y.%m.%d}",
+            "kpis": kpis[:6],
+            "summary": split_lines(st.session_state[f"ed_sum_{k}"]),
+            "coaching": split_lines(st.session_state[f"ed_coach_{k}"]),
+            "coaching_title": coaching_title,
+            "table": table,
+            "stats": doc_stats if with_figs else [],
+            "figures": doc_figs if with_figs else [],
+            "draft": st.session_state[f"ed_draft_{k}"],
+        }
+        file_base = f"{title.replace(' ', '_')}_{rep['label']}"
+        d1, d2 = st.columns(2, gap="medium")
+        if find_pdf_font() is None:
+            d1.warning("PDF에 쓸 한글 글꼴을 찾지 못했어요.  \nstatic 폴더에 report-regular.ttf 를 넣어 주세요.")
+        else:
+            try:
+                d1.download_button("PDF로 내려받기", data=report_pdf(doc), file_name=f"{file_base}.pdf",
+                                   mime="application/pdf", type="primary", use_container_width=True, key="report_pdf")
+            except Exception:
+                d1.error("PDF를 만들지 못했어요.  \n잠시 뒤 다시 눌러 주세요.")
+        try:
+            d2.download_button("Word로 내려받기 (.docx)", data=report_docx(doc), file_name=f"{file_base}.docx",
+                               mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                               use_container_width=True, key="report_docx")
+        except Exception:
+            d2.error("Word 파일을 만들지 못했어요.  \n잠시 뒤 다시 눌러 주세요.")
 
 
 def leave(screen):
@@ -1338,9 +3011,7 @@ def saved_chats():
     )
 
 
-def ids_to_names(text):
-    # 저장된 child_id(C01, N01 …)를 화면에 보여 줄 때만 이름으로 되돌린다 (모르는 번호는 번호 그대로)
-    return re.sub(r"(?<![A-Za-z0-9])([CN]\d{2})(?!\d)", lambda m: name_of(m.group(1)), text)
+# 저장된 child_id를 이름으로 되돌리는 ids_to_names 는 위 멘토링 보고서 부분에 있다 (조사도 이름에 맞춰 고친다)
 
 
 def chat_history():
@@ -1481,8 +3152,12 @@ def chatbot():
 
 # 챗봇을 화면보다 먼저 그린다 — 챗봇에서 만든 AI 미션 카드가 같은 실행에서 화면 2에 바로 나오게 (아이콘은 CSS로 오른쪽 아래에 떠 있다)
 chatbot()
+# 사이드바 멘토링 보고서 필터·버튼 — 화면보다 먼저 그려, 버튼을 누르면 같은 실행에서 보고서 화면으로 바뀐다
+report_sidebar()
 
 {
+    "s_start": screen_start,
+    "s_report": screen_report,
     "s1": screen_1,
     "s1_card": screen_1_card,
     "s1_1": screen_1_1,
