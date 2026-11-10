@@ -1,0 +1,20 @@
+# 비밀 키 (Supabase, Gemini)
+.env
+.env.*
+.streamlit/secrets.toml
+
+# 파이썬이 실행할 때 저절로 만드는 파일
+__pycache__/
+*.pyc
+
+# 내 컴퓨터에서만 쓰는 Claude 설정
+.claude/settings.local.json
+
+# 날짜 붙인 백업 사본 (git 기록이 백업 역할을 함)
+*.backup-*.csv
+99_backup/
+
+# 운영체제가 만드는 숨김 파일
+Thumbs.db
+desktop.ini
+.DS_Store

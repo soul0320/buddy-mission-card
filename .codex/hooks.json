@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python 'c:\\Users\\souls\\Downloads\\전주ICT 웹MVP 제작과정\\my_service\\.codex\\hooks\\prd_lock.py'"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python 'c:\\Users\\souls\\Downloads\\전주ICT 웹MVP 제작과정\\my_service\\.codex\\hooks\\mission-count.py'"
+          },
+          {
+            "type": "command",
+            "command": "python 'c:\\Users\\souls\\Downloads\\전주ICT 웹MVP 제작과정\\my_service\\.codex\\hooks\\card-content.py'"
+          },
+          {
+            "type": "command",
+            "command": "python 'c:\\Users\\souls\\Downloads\\전주ICT 웹MVP 제작과정\\my_service\\.codex\\hooks\\card-not-preparing.py'"
+          },
+          {
+            "type": "command",
+            "command": "python 'c:\\Users\\souls\\Downloads\\전주ICT 웹MVP 제작과정\\my_service\\.codex\\hooks\\reward.py'"
+          }
+        ]
+      }
+    ]
+  }
+}
