@@ -1492,6 +1492,9 @@ chatbot()
     "s3": screen_3,
 }[st.session_state.screen]()
 
+# 모든 화면 맨 아래 저작권 한 줄
+st.caption("© 2026 짝꿍 미션 카드 · YUCO MARBLE")
+
 if st.session_state.popup == "p1":
     popup_1()
 elif st.session_state.popup == "p2":
