@@ -226,6 +226,13 @@ st.markdown(
     .yuco-side-title.side-report { margin: 18px 0 8px 2px; }
     .yuco-side-steps { margin: 0; padding-left: 18px; }
     .yuco-side-steps li { margin: 2px 0; }
+    /* 보고서 기간 띠 — 언제부터 언제까지인지 제목 바로 아래에 크게 */
+    .yuco-period { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap;
+        background: #FFFFFF; border: 1px solid #DCE5F0; border-left: 4px solid #1E2A5A;
+        border-radius: 12px; padding: 8px 14px; margin: 2px 0 6px;
+        color: #1E2A5A; font-weight: 700; font-size: 15px; box-shadow: 0 2px 8px rgba(30, 42, 90, .04); }
+    .yuco-period-k { background: #FFE9A8; color: #1E2A5A; border-radius: 999px; padding: 1px 10px;
+        font-size: 12px; font-weight: 800; }
     /* 보고서 숫자 칸 — 한 줄에 4칸, 옅은 하늘색 바탕에 남색 숫자 */
     .yuco-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 4px 0 14px; }
     .yuco-kpi { background: #FFFFFF; border: 1px solid #DCE5F0; border-radius: 14px;
@@ -951,7 +958,7 @@ def by_sentence(text):
 
 # AI 미션 카드 지시문 — 전체 이용가 규칙 뒤에 붙인다 (내용은 ai_rules.md)
 AI_CARD_RULE = SAFE_RULE + AI_RULES["AI_CARD_RULE"]
-# 멘토링 보고서의 AI 세 줄 요약·보고서 초안 지시문 (내용은 ai_rules.md)
+# 멘토링 보고서의 핵심 요약·지도 코칭·보고서 초안 지시문 (내용은 ai_rules.md)
 REPORT_RULE = SAFE_RULE + AI_RULES["REPORT_RULE"]
 
 # AI 미션 카드에 넣을 의식주·문화 요소를 고르는 체크 칸 (나라는 직접 적는다)
@@ -1474,6 +1481,23 @@ def range_label(mode, rng):
     return f"{a:%Y.%m.%d}" if a == b else f"{a:%Y.%m.%d}~{b:%Y.%m.%d}"
 
 
+WEEKDAYS = "월화수목금토일"
+
+
+def report_period(rows, rounds):
+    # "1차~6차 · 2026.10.14(화) ~ 2026.11.10(화) · 활동일 4일" — 회차와 날짜를 한 줄로 (기록이 없으면 회차만)
+    days = sorted({record_day(r) for r in rows})
+    round_txt = (f"{rounds[0]}차" if rounds[0] == rounds[-1] else f"{rounds[0]}차~{rounds[-1]}차") if rounds else "회차 없음"
+    if not days:
+        return round_txt
+
+    def d(x):
+        return f"{x:%Y.%m.%d}({WEEKDAYS[x.weekday()]})"
+
+    day_txt = d(days[0]) if days[0] == days[-1] else f"{d(days[0])} ~ {d(days[-1])}"
+    return f"{round_txt}  ·  {day_txt}  ·  활동일 {len(days)}일"
+
+
 def report_kind(kids):
     # 아동 선택 수에 따라 보고서 종류 — 0명: 전체, 1명: 개인, 2명 이상: 관계
     return "전체" if not kids else "개인" if len(kids) == 1 else "관계"
@@ -1651,7 +1675,7 @@ def report_data(rep):
                 "child_id": c, "아동": report_name(c), "회차": r["game_no"], "반응": r["reaction"],
                 "점수": REACTION_SCORE[r["reaction"]],
                 # AI 미션 카드는 missions.csv 에 없어 종류·난이도를 모른다
-                "미션종류": info.get("mission_type") or "AI·기타",
+                "미션종류": info.get("mission_type") or "AI 미션 카드",
                 "난이도": info.get("difficulty") or "미정",
                 "인원": len(kids),
                 "기록": i,
@@ -1688,8 +1712,10 @@ def parse_report(text):
         return [line for line in lines if line]
 
     head, _, draft = text.partition("[초안]")
-    summ, _, coach = head.partition("[코칭]")
-    return bullets(summ.replace("[요약]", ""))[:3], bullets(coach)[:4], draft.strip()
+    summ, _, rest = head.partition("[코칭]")
+    coach, _, report_coach = rest.partition("[보고서 코칭]")
+    return (bullets(summ.replace("[요약]", ""))[:3], bullets(coach)[:4],
+            bullets(report_coach)[:4], draft.strip())
 
 
 def names_to_ids(lines, df):
@@ -1704,7 +1730,7 @@ def names_to_ids(lines, df):
 
 
 def make_report_text(rep, rows, df, skips, finales, rounds, stats_lines=(), focus_lines=()):
-    # AI 세 줄 요약 · 지도 코칭 · 보고서 초안 — 실패하거나 규칙에 어긋나면 (None, 이유)
+    # 핵심 요약 · 지도 코칭 · 보고서 초안 — 실패하거나 규칙에 어긋나면 (None, 이유)
     kind, kids = rep.get("kind", "전체"), rep.get("kids", [])
     focus = f"[보고서 종류] {kind}" + (f" — 대상: {', '.join(kids)}" if kids else " — 고른 범위의 아동 전체")
     try:
@@ -1720,13 +1746,14 @@ def make_report_text(rep, rows, df, skips, finales, rounds, stats_lines=(), focu
         out = (interaction.output_text or "").strip()
     except Exception as e:
         return None, friendly_ai_error(e, "AI 요약을 만들지 못해 기본 요약을 보여 드려요")
-    summary, coaching, draft = parse_report(out)
-    if len(summary) < 3 or len(coaching) < 2 or not draft or not is_safe(out):
+    summary, coaching, report_coaching, draft = parse_report(out)
+    if len(summary) < 3 or len(coaching) < 2 or len(report_coaching) < 2 or not draft or not is_safe(out):
         return None, "AI 답이 형식에 맞지 않아 기본 요약을 보여 드려요."
-    return {"summary": summary, "coaching": coaching, "draft": draft, "ai": True}, None
+    # coaching = 화면 [지도 코칭] 탭(멘토용 말투), report_coaching = 보고서에 들어가는 보고서 문체
+    return {"summary": summary, "coaching": coaching, "report_coaching": report_coaching, "draft": draft, "ai": True}, None
 
 
-def fallback_report(rep, df, skips, finales, n_missions, c, focus_lines=(), coaching=()):
+def fallback_report(rep, df, skips, finales, n_missions, c, focus_lines=(), coaching=(), report_coaching=()):
     # AI를 못 쓸 때의 기본 요약·코칭·초안 — 기록 숫자만으로 만든다 (c = 미션 건수로 센 좋음·보통·기피)
     kids = df["child_id"].nunique()
     good = df[df["반응"] == "좋음"]["child_id"].value_counts()
@@ -1748,9 +1775,9 @@ def fallback_report(rep, df, skips, finales, n_missions, c, focus_lines=(), coac
         f"짝꿍 미션은 모두 {n_missions}건이었습니다.",
         f"미션 직후 멘토가 기록한 또래관계 반응은 {reactions}이었습니다."
         + (" " + " ".join(focus_lines) if focus_lines else f" '좋음'이 가장 많았던 아동은 {top}."),
-        "다음 회기에는 " + (coaching[0] if coaching else "아직 낯설어하는 아동이 부담 없이 참여할 수 있는 짝꿍 미션을 이어 가겠습니다."),
+        report_coaching[-1] if report_coaching else "다음 회기에는 아직 낯설어하는 아동이 부담 없이 참여할 수 있는 짝꿍 미션을 이어 갈 예정입니다.",
     ])
-    return {"summary": summary, "coaching": list(coaching), "draft": draft, "ai": False}
+    return {"summary": summary, "coaching": list(coaching), "report_coaching": list(report_coaching), "draft": draft, "ai": False}
 
 
 # 받침 있는 말 뒤 / 없는 말 뒤에 붙는 조사 짝 — 긴 조사부터 찾도록 JOSA_RE 에서 길이순으로 묶는다
@@ -1901,7 +1928,7 @@ def report_pdf(doc):
         pdf.cell(box_w, 7, str(value), align="C")
     pdf.set_y(top + 24)
 
-    section("AI 세 줄 요약")
+    section("핵심 요약")
     bullets(doc["summary"])
     if doc.get("coaching"):
         section(doc.get("coaching_title", "지도 코칭"))
@@ -1993,7 +2020,7 @@ def report_docx(doc):
         for r in (0, 1):
             t.cell(r, i).paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    d.add_heading("AI 세 줄 요약", level=1)
+    d.add_heading("핵심 요약", level=1)
     for s in doc["summary"]:
         d.add_paragraph(s, style="List Bullet")
     if doc.get("coaching"):
@@ -2093,7 +2120,7 @@ def analyze(df):
     # 2) 다중 회귀 — 반응 점수 ~ 회차 + 미션 종류 + 난이도 + 성향(아동 2명 이상이 가진 성향만)
     # 함께한 인원은 미션 종류와 겹치므로(개인 미션 = 늘 1명) 넣지 않는다
     # AI 미션 카드 기록은 종류·난이도를 몰라 다중 회귀에서만 뺀다
-    known = df[df["미션종류"] != "AI·기타"]
+    known = df[df["미션종류"] != "AI 미션 카드"]
     data = pd.DataFrame({"score": known["점수"], "rnd": known["회차"],
                          "mtype": known["미션종류"], "diff": known["난이도"]})
     labels = {"rnd": "회차(1회차 늘 때)"}
@@ -2143,7 +2170,7 @@ def analyze(df):
         })
         out["coef"] = coef[coef["변수"] != "Intercept"].reset_index(drop=True)
         out["model"] = {"n": int(fit.nobs), "r2": fit.rsquared, "adj_r2": fit.rsquared_adj,
-                        "ai_rows": int((df["미션종류"] == "AI·기타").sum())}
+                        "ai_rows": int((df["미션종류"] == "AI 미션 카드").sum())}
     else:
         out["coef"], out["model"] = None, {"n": len(data), "need": k + 10}
 
@@ -2337,15 +2364,16 @@ def fmt(v, spec=".2f", empty="-"):
     return empty if v is None or v != v else format(v, spec)
 
 
-def default_coaching(kind, m=None, r=None):
-    # AI를 못 쓸 때의 지도 코칭 — 기록 숫자에서 바로 뽑는다 (아이를 규정하지 않고, 해 볼 일 위주로)
+def mentor_coaching(kind, m=None, r=None):
+    # 화면 [지도 코칭] 탭용 — 멘토가 현장에서 바로 읽는 말투("~해 보세요")
+    # 보고서(편집 탭·PDF·Word)에는 아래 default_coaching 의 보고서 문체가 들어간다
     if kind == "개인":
         tips = []
         best_t = m["types"][m["types"]["count"] >= 2].head(1)
         if len(best_t):
             bt = best_t.iloc[0]
             tips.append(f"{m['name']}{josa(m['name'], '은')} '{bt['미션종류']}' 미션에서 반응이 가장 좋았어요(평균 {bt['mean']:.2f}점). 다음 회기 첫 미션으로 권해 보세요.")
-        best_p = m["partners"][m["partners"]["count"] >= 2].head(1)
+        best_p = m["partners"][(m["partners"]["count"] >= 2) & (m["partners"]["mean"] >= 1.5)].head(1)
         if len(best_p):
             bp = best_p.iloc[0]
             tips.append(f"{bp['아동']}{josa(bp['아동'], '와')} 함께할 때 평균 {bp['mean']:.2f}점으로 잘 어울렸어요. 낯선 친구와 짝을 지을 때 {bp['아동']}{josa(bp['아동'], '을')} 다리 역할로 함께 넣어 보세요.")
@@ -2369,6 +2397,61 @@ def default_coaching(kind, m=None, r=None):
     return ["'좋음'이 많았던 미션 종류를 다음 회기 앞쪽에 배치해 보세요.",
             "기피가 나온 짝은 바로 다시 붙이기보다 합동 미션으로 천천히 이어 주세요.",
             "'룰 미숙지' 스킵이 나온 미션은 시작 전에 규칙을 한 번 더 짧게 보여 주세요."]
+
+
+def default_coaching(kind, m=None, r=None, a=None):
+    # AI를 못 쓸 때의 지도 코칭 — 기록 숫자에서 바로 뽑아 멘토링 보고서 문체(합니다체)로 쓴다
+    # 좋아진 근거(유의미한 상승, 2번 이상 함께한 양의 시너지)가 있을 때만 "개선되었습니다/좋아졌습니다"라고 쓰고,
+    # 부족한 점은 "~해야 합니다/~이 필요합니다", 다음 회기 계획은 "~할 예정입니다"로 쓴다
+    if kind == "개인":
+        tips = []
+        if "좋아짐" in m["judge"]:
+            tips.append(f"회차가 진행될수록 반응 점수가 회차당 {m['slope']:+.2f}점씩 유의미하게 상승하여(p={m['p']:.3f}), "
+                        f"짝꿍 미션을 통해 {m['name']}의 또래 상호작용이 개선되었습니다.")
+        best_t = m["types"][m["types"]["count"] >= 2].head(1)
+        if len(best_t):
+            bt = best_t.iloc[0]
+            tips.append(f"{m['name']}{josa(m['name'], '은')} '{bt['미션종류']}' 미션에서 평균 {bt['mean']:.2f}점으로 가장 높은 반응을 보였습니다. "
+                        "다음 회기에는 이 미션 종류를 첫 미션으로 배치할 예정입니다.")
+        # '안정적인 관계'는 2번 이상 함께했고 평균이 1.5점(보통과 좋음 사이) 이상일 때만 쓴다
+        best_p = m["partners"][(m["partners"]["count"] >= 2) & (m["partners"]["mean"] >= 1.5)].head(1)
+        if len(best_p):
+            bp = best_p.iloc[0]
+            tips.append(f"{bp['아동']}{josa(bp['아동'], '와')} 함께한 미션에서 평균 {bp['mean']:.2f}점으로 안정적인 또래 관계를 보였습니다. "
+                        f"새로운 친구와의 관계 확장을 위해 {bp['아동']}{josa(bp['아동'], '을')} 연결 역할로 함께 배치할 예정입니다.")
+        if m["avoid"] > 0:
+            tips.append("기피 반응이 나온 미션은 바로 반복하지 않고, 몸짓·그림으로 참여할 수 있는 합동 미션으로 단계적으로 연결해야 합니다.")
+        tips.append("미션 후에는 결과보다 시도한 과정을 구체적으로 칭찬하여 참여 동기를 높일 예정입니다.")
+        return tips[:4]
+    if kind == "관계":
+        tips = []
+        p = r["pairs"].dropna(subset=["함께 평균"]).sort_values("시너지", ascending=False)
+        if len(p):
+            best = p.iloc[0]
+            if best["시너지"] > 0 and best["함께한 횟수"] >= 2:
+                tips.append(f"{best['짝']} 짝은 함께할 때 각자 평균보다 {best['시너지']:+.2f}점 높은 반응을 보여, 함께한 활동을 통해 관계가 좋아졌습니다. "
+                            "다음 회기에도 새 미션의 시작을 이 짝으로 열 예정입니다.")
+            else:
+                tips.append(f"{best['짝']} 짝은 함께한 미션에서 평균 {best['함께 평균']:.2f}점을 보였습니다. "
+                            "함께하는 횟수를 늘려 관계 변화를 더 살펴볼 예정입니다.")
+            worst = p.iloc[-1]
+            if len(p) > 1 and worst["시너지"] < 0:
+                tips.append(f"{worst['짝']} 짝은 함께한 미션의 평균이 {worst['함께 평균']:.2f}점으로 아직 관계 형성이 필요합니다. "
+                            "경쟁보다 합동 미션으로, 잘 어울리는 친구를 한 명 더 배치해 관계를 개선할 예정입니다.")
+        if r["pairs"]["함께한 횟수"].eq(0).any():
+            tips.append("아직 함께한 적이 없는 짝이 있어, 부담이 적은 쉬움 난이도 합동 미션으로 첫 상호작용을 만들 예정입니다.")
+        tips.append("미션 후에는 서로에게 고마웠던 점을 한 마디씩 나누는 시간을 운영하여 관계를 이어 갈 예정입니다.")
+        return tips[:4]
+    tips = []
+    if a is not None and a["coef"] is not None:
+        rnd = a["coef"][a["coef"]["변수"].str.startswith("회차")]
+        if len(rnd) and rnd.iloc[0]["p값"] < SIG_LEVEL and rnd.iloc[0]["계수"] > 0:
+            tips.append(f"회차가 진행될수록 전체 반응 점수가 회차당 {rnd.iloc[0]['계수']:+.2f}점씩 유의미하게 상승하여(p={rnd.iloc[0]['p값']:.3f}), "
+                        "짝꿍 미션을 통해 아동들의 또래 상호작용이 개선되었습니다.")
+    tips += ["'좋음' 반응이 많았던 미션 종류를 다음 회기 앞부분에 배치하여 참여 분위기를 높일 예정입니다.",
+             "기피 반응이 나온 짝은 즉시 다시 연결하지 않고, 합동 미션을 통해 단계적으로 관계를 개선할 예정입니다.",
+             "'룰 미숙지'로 넘긴 미션은 시작 전에 규칙을 짧게 다시 안내해야 합니다."]
+    return tips[:4]
 
 
 @st.cache_data(show_spinner=False)
@@ -2558,9 +2641,14 @@ def screen_report():
     names = [report_name(c) for c in kids]
     title = {"전체": "멘토링 보고서", "개인": f"{names[0] if names else ''} 개인 리포트",
              "관계": f"{'·'.join(names)} 관계 리포트"}[kind]
-    subtitle = f"{rep['mode']} {rep['label']}  ·  {kind} 보고서" + (f"  ·  대상 {', '.join(names)}" if names else "")
+    # 기간 — 회기별이면 그 회차들이 열린 날짜(첫 기록 ~ 마지막 기록)를, 기간별이면 그 날짜에 든 회차를 함께 보여 준다
+    period = report_period(rows, rounds)
+    subtitle = f"{period}  ·  {kind} 보고서" + (f"  ·  대상 {', '.join(names)}" if names else "")
     st.subheader(title)
-    st.caption(subtitle + f"  ·  범위 안 미션 {n_missions}건 · 스킵 {len(skips)}건")
+    st.markdown(f'<div class="yuco-period"><span class="yuco-period-k">기간</span>{html.escape(period)}</div>',
+                unsafe_allow_html=True)
+    st.caption(f"{kind} 보고서" + (f"  ·  대상 {', '.join(names)}" if names else "")
+               + f"  ·  범위 안 미션 {n_missions}건 · 스킵 {len(skips)}건")
     if df.empty:
         st.warning("고른 범위에 반응 기록이 없어요.  \n사이드바에서 범위를 바꿔 주세요.")
         return
@@ -2605,7 +2693,7 @@ def screen_report():
         focus_lines.append(f"스킵 {m['skips']}번, 피날레 머뭇거림 {m['hesitant']}번.")
         focus_fig = ("개인 그래프", *fig_individual(df, kids[0]))
         coaching_title = "개인 맞춤 지도 코칭"
-        default_tips = default_coaching("개인", m=m)
+        mentor_tips, report_tips = mentor_coaching("개인", m=m), default_coaching("개인", m=m)
     elif kind == "관계":
         r = relation_focus(df, kids)
         gm = sum(s for _, s in r["group"]) / len(r["group"]) if r["group"] else float("nan")
@@ -2624,7 +2712,7 @@ def screen_report():
             focus_lines.append(f"{s['아동']}: 고른 친구 없이 {fmt(s['따로'])}점({int(s['따로 n'])}건) / 고른 친구와 {fmt(s['함께'])}점({int(s['함께 n'])}건).")
         focus_fig = ("관계 그래프", *fig_relation(df, tuple(kids)))
         coaching_title = "관계 맞춤 지도 코칭"
-        default_tips = default_coaching("관계", r=r)
+        mentor_tips, report_tips = mentor_coaching("관계", r=r), default_coaching("관계", r=r)
     else:
         kpis = [("미션", f"{n_missions}건")] + [(k, f"{counts.get(k, 0)}건") for k in REACTION_ORDER]
         tr = a["trend"]
@@ -2635,27 +2723,30 @@ def screen_report():
         focus_lines = []
         focus_fig = None
         coaching_title = "다음 회기 지도 코칭"
-        default_tips = default_coaching("전체")
+        mentor_tips, report_tips = mentor_coaching("전체"), default_coaching("전체", a=a)
 
     kpi_tiles(kpis)
 
     # AI 요약 · 코칭 · 초안 — 범위·아동마다 한 번만 만든다 (다시 그릴 때 Gemini를 또 부르지 않게)
-    cache = st.session_state.setdefault("report_ai", {})
+    # 문체를 바꾼 뒤 예전에 만든 요약이 남지 않게 새 이름(v2)으로 담는다
+    cache = st.session_state.setdefault("report_ai_v3", {})
     if rep["key"] not in cache:
         result, note = make_report_text(rep, rows, df, skips, finales, rounds,
                                         names_to_ids(lines, df), names_to_ids(focus_lines, df))
         if result is None:
-            result = fallback_report(rep, df, skips, finales, n_missions, counts, focus_lines, default_tips)
+            result = fallback_report(rep, df, skips, finales, n_missions, counts, focus_lines, mentor_tips, report_tips)
             result["note"] = note
         cache[rep["key"]] = result
     res = cache[rep["key"]]
     summary = [ids_to_names(s) for s in res["summary"]]
-    coaching = [ids_to_names(s) for s in res.get("coaching") or default_tips]
+    # 화면 [지도 코칭] 탭 = 멘토용 말투 / 보고서(편집 탭·PDF·Word) = 보고서 문체
+    coaching = [ids_to_names(s) for s in res.get("coaching") or mentor_tips]
+    report_coaching = [ids_to_names(s) for s in res.get("report_coaching") or report_tips]
     ai_note = "AI가 쓴 초안입니다." if res.get("ai") else res.get("note") or "기록 숫자로 만든 기본 요약입니다."
 
     def summary_box():
         with st.container(border=True):
-            st.markdown("**AI 세 줄 요약**")
+            st.markdown("**핵심 요약**")
             for s in summary:
                 st.markdown(f"- {s}")
             st.caption(ai_note)
@@ -2749,7 +2840,8 @@ def screen_report():
                 st.markdown(f"**{coaching_title}**")
                 for i, tip in enumerate(coaching, 1):
                     st.markdown(f"{i}. {tip}")
-                st.caption(ai_note if res.get("ai") else "기록 숫자로 만든 기본 코칭이에요.")
+                st.caption((ai_note if res.get("ai") else "기록 숫자로 만든 기본 코칭이에요.")
+                           + "  \n멘토가 현장에서 보는 코칭이에요. 보고서(편집·PDF·Word)에는 보고서 문체로 들어가요.")
         edit_tab = tabs[3]
         doc_figs = [(focus_fig[0], focus_fig[1], focus_fig[2])]
         doc_stats = focus_lines
@@ -2758,14 +2850,14 @@ def screen_report():
     with edit_tab:
         k = rep["key"]
         defaults = {f"ed_title_{k}": title, f"ed_sum_{k}": "\n".join(summary),
-                    f"ed_coach_{k}": "\n".join(coaching), f"ed_draft_{k}": ids_to_names(res["draft"])}
+                    f"ed_coach_{k}": "\n".join(report_coaching), f"ed_draft_{k}": ids_to_names(res["draft"])}
         for key, value in defaults.items():
             st.session_state.setdefault(key, value)
         st.caption("PDF·Word 에 들어갈 글을 여기서 고쳐요. 고친 뒤 칸 밖을 한 번 누르면 저장돼요.  \n"
                    "Word 로 내려받으면 그림까지 넣은 채로 Word 에서 더 고칠 수 있어요.")
         st.text_input("보고서 제목", key=f"ed_title_{k}")
         c1, c2 = st.columns(2, gap="medium")
-        c1.text_area("AI 세 줄 요약 (한 줄에 하나)", key=f"ed_sum_{k}", height=150)
+        c1.text_area("핵심 요약 (한 줄에 하나)", key=f"ed_sum_{k}", height=150)
         c2.text_area(f"{coaching_title} (한 줄에 하나)", key=f"ed_coach_{k}", height=150)
         st.text_area("보고서 본문 (빈 줄로 문단 나누기)", key=f"ed_draft_{k}", height=260)
         with_figs = st.checkbox("그래프·정량 분석 넣기", value=True, key=f"ed_figs_{k}")
